@@ -12,6 +12,7 @@ var CAT_COLORS = ["#FF8A65", "#4DB6AC", "#7986CB", "#F06292", "#90A4AE", "#AED58
 
 var DJ = ["日", "月", "火", "水", "木", "金", "土"];
 var SK = "madoka-housework-v1";
+var TK = "madoka-housework-timer";
 
 function getToday() {
   var n = new Date();
@@ -70,9 +71,16 @@ export default function App() {
   var _t = useState("home"), tab = _t[0], setTab = _t[1];
   var _at = useState(null), addingTo = _at[0], setAddingTo = _at[1];
   // Running timers: { taskId: { startedAt: timestamp, elapsed: seconds } }
-  var _run = useState({}), running = _run[0], setRunning = _run[1];
+  var _savedTimer = (function () {
+    try {
+      var raw = localStorage.getItem(TK);
+      if (raw) return JSON.parse(raw);
+    } catch (e) {}
+    return null;
+  })();
+  var _run = useState(_savedTimer ? _savedTimer.running || {} : {}), running = _run[0], setRunning = _run[1];
   // Paused timers: { taskId: elapsed }
-  var _paused = useState({}), paused = _paused[0], setPaused = _paused[1];
+  var _paused = useState(_savedTimer ? _savedTimer.paused || {} : {}), paused = _paused[0], setPaused = _paused[1];
   var tickRef = useRef(null);
   var _now = useState(Date.now()), nowMs = _now[0], setNowMs = _now[1];
 
@@ -81,6 +89,13 @@ export default function App() {
     tickRef.current = setInterval(function () { setNowMs(Date.now()); }, 1000);
     return function () { clearInterval(tickRef.current); };
   }, []);
+
+  // Persist timer state to localStorage
+  useEffect(function () {
+    try {
+      localStorage.setItem(TK, JSON.stringify({ running: running, paused: paused }));
+    } catch (e) {}
+  }, [running, paused]);
 
   useEffect(function () {
     try {
