@@ -449,7 +449,7 @@ export default function App() {
         )}
 
         {tab === "stats" && (
-          <StatsTab data={data} cats={cats} />
+          <StatsTab data={data} cats={cats} save={save} />
         )}
       </main>
 
@@ -701,10 +701,13 @@ function AddCategoryForm(p) {
 }
 
 function StatsTab(p) {
-  var data = p.data, cats = p.cats;
+  var data = p.data, cats = p.cats, save = p.save;
   var logs = data.logs || [];
   const [monthOffset, setMonthOffset] = useState(0);
   const [selectedDay, setSelectedDay] = useState(null);
+  const [editingLog, setEditingLog] = useState(null);
+  const [editH, setEditH] = useState("");
+  const [editM, setEditM] = useState("");
 
   var viewDate = new Date(NOW.getFullYear(), NOW.getMonth() + monthOffset, 1);
   var viewYear = viewDate.getFullYear();
@@ -796,6 +799,7 @@ function StatsTab(p) {
           {selLogs.length === 0 && <div style={{ fontSize: 12, color: "#ccc" }}>この日の記録はありません</div>}
           {selLogs.map(function (l) {
             var cat = cats.find(function (c) { return c.id === l.category; }) || cats[cats.length - 1];
+            var isEditing = editingLog === l.id;
             return (
               <div key={l.id} style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 0", borderBottom: "1px solid #f5f5f5" }}>
                 <div style={{ width: 30, height: 30, borderRadius: 8, background: cat.color + "20", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 16 }}>{cat.emoji}</div>
@@ -804,7 +808,36 @@ function StatsTab(p) {
                   <div style={{ fontSize: 11, color: "#aaa" }}>{cat.name} ・ {l.time}</div>
                 </div>
                 <div style={{ textAlign: "right" }}>
-                  <div style={{ fontSize: 12, fontWeight: 700, color: "#2196F3" }}>{fmtMin(l.seconds)}</div>
+                  {isEditing ? (
+                    <div>
+                      <div style={{ display: "flex", alignItems: "center", gap: 2 }}>
+                        <input type="number" min="0" value={editH} onChange={function (e) { setEditH(e.target.value); }} style={{ width: 32, padding: "2px 3px", borderRadius: 5, border: "1.5px solid #2196F3", fontSize: 12, textAlign: "center", outline: "none", fontFamily: "inherit" }} />
+                        <span style={{ fontSize: 10, color: "#888" }}>時間</span>
+                        <input type="number" min="0" max="59" value={editM} onChange={function (e) { setEditM(e.target.value); }} style={{ width: 32, padding: "2px 3px", borderRadius: 5, border: "1.5px solid #2196F3", fontSize: 12, textAlign: "center", outline: "none", fontFamily: "inherit" }} />
+                        <span style={{ fontSize: 10, color: "#888" }}>分</span>
+                      </div>
+                      <div style={{ display: "flex", gap: 3, marginTop: 4, justifyContent: "flex-end" }}>
+                        <button onClick={function () {
+                          var newSec = (Math.max(0, parseInt(editH) || 0) * 3600) + (Math.max(0, Math.min(59, parseInt(editM) || 0)) * 60);
+                          var d = clone(data);
+                          d.logs = d.logs.map(function (lg) { return lg.id === l.id ? Object.assign({}, lg, { seconds: newSec }) : lg; });
+                          save(d);
+                          setEditingLog(null);
+                        }} style={{ background: "#4CAF50", color: "#fff", border: "none", borderRadius: 5, padding: "3px 8px", fontSize: 10, fontWeight: 700, cursor: "pointer" }}>✓</button>
+                        <button onClick={function () { setEditingLog(null); }} style={{ background: "#eee", color: "#999", border: "none", borderRadius: 5, padding: "3px 8px", fontSize: 10, fontWeight: 700, cursor: "pointer" }}>✕</button>
+                      </div>
+                    </div>
+                  ) : (
+                    <div onClick={function () {
+                      setEditingLog(l.id);
+                      var h = Math.floor(l.seconds / 3600);
+                      var m = Math.floor((l.seconds % 3600) / 60);
+                      setEditH(String(h));
+                      setEditM(String(m));
+                    }} style={{ cursor: "pointer" }}>
+                      <div style={{ fontSize: 12, fontWeight: 700, color: "#2196F3" }}>{fmtMin(l.seconds)} ✏️</div>
+                    </div>
+                  )}
                   <div style={{ fontSize: 10, color: "#FFB300", fontWeight: 700 }}>+{l.points || 1}pt</div>
                 </div>
               </div>
