@@ -1,16 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from "react";
-import { createClient } from "@supabase/supabase-js";
 
-// ═══════════════════════════════════════════════
-// Supabase 設定
-// ═══════════════════════════════════════════════
-const SUPABASE_URL = "https://jjfapdomwrkeenswotoc.supabase.co";
-const SUPABASE_KEY = "sb_publishable_dA_dsxfo-_6HP0nRBcs27A_pCFOE-oV";
-const sb = createClient(SUPABASE_URL, SUPABASE_KEY);
-
-// ═══════════════════════════════════════════════
-// 定数
-// ═══════════════════════════════════════════════
 var DEF_CATEGORIES = [
   { id: "cooking", name: "料理", emoji: "🍳", color: "#FF8A65" },
   { id: "cleaning", name: "掃除", emoji: "🧹", color: "#4DB6AC" },
@@ -22,8 +11,15 @@ var DEF_CATEGORIES = [
 var CAT_COLORS = ["#FF8A65", "#4DB6AC", "#7986CB", "#F06292", "#90A4AE", "#AED581", "#FFD54F", "#CE93D8", "#4FC3F7", "#E57373", "#81C784", "#FFB74D"];
 
 var DJ = ["日", "月", "火", "水", "木", "金", "土"];
-var TK = "madoka-housework-timer";        // タイマー状態（ローカルのみ・端末固有）
-var OLD_LS_KEY = "madoka-housework-v1";   // 旧localStorageキー（移行用）
+var SK = "madoka-housework-v1";
+var TK = "madoka-housework-timer";
+
+function getToday() {
+  var n = new Date();
+  return { now: n, td: n.getFullYear() + "-" + String(n.getMonth() + 1).padStart(2, "0") + "-" + String(n.getDate()).padStart(2, "0") };
+}
+var NOW = new Date();
+var TD = getToday().td;
 
 var DEF_REWARDS = [
   { id: "hr1", name: "マッサージに行く", cost: 100, emoji: "💆" },
@@ -35,15 +31,8 @@ var DEF_REWARDS = [
   { id: "hr7", name: "好きな本を買う", cost: 40, emoji: "📖" },
 ];
 
-function getToday() {
-  var n = new Date();
-  return { now: n, td: n.getFullYear() + "-" + String(n.getMonth() + 1).padStart(2, "0") + "-" + String(n.getDate()).padStart(2, "0") };
-}
-var NOW = new Date();
-var TD = getToday().td;
-
-function emptyData() {
-  return { tasks: {}, logs: [], streak: 0, lastLogDate: "", categories: DEF_CATEGORIES.map(function (c) { return Object.assign({}, c); }), points: 0, pointHistory: [], rewards: DEF_REWARDS.map(function (r) { return Object.assign({}, r); }) };
+function mkData() {
+  return { tasks: {}, taskOrder: [], logs: [], streak: 0, lastLogDate: "", categories: DEF_CATEGORIES.map(function (c) { return Object.assign({}, c); }), points: 0, pointHistory: [], rewards: DEF_REWARDS.map(function (r) { return Object.assign({}, r); }) };
 }
 
 function clone(d) { return JSON.parse(JSON.stringify(d)); }
@@ -63,150 +52,25 @@ function fmtMin(s) {
   return m + "分";
 }
 
+function dateLabel(s) {
+  try {
+    var d = new Date(s);
+    return (d.getMonth() + 1) + "/" + d.getDate() + "(" + DJ[d.getDay()] + ")";
+  } catch (e) { return s; }
+}
+
 function daysBetween(a, b) {
   var d1 = new Date(a); var d2 = new Date(b);
   return Math.round((d2 - d1) / 86400000);
 }
 
-// ═══════════════════════════════════════════════
-// Supabase: 全データ読み込み
-// ═══════════════════════════════════════════════
-async function loadAllFromSupabase() {
-  var results = await Promise.all([
-    sb.from("categories").select("*"),
-    sb.from("tasks").select("*"),
-    sb.from("records").select("*"),
-    sb.from("rewards").select("*"),
-    sb.from("point_history").select("*"),
-    sb.from("app_state").select("*").eq("id", 1).maybeSingle(),
-  ]);
-  var cRes = results[0], tRes = results[1], rRes = results[2], rwRes = results[3], phRes = results[4], asRes = results[5];
-
-  var cats = (cRes.data || []).filter(function (c) { return !c.is_deleted; }).sort(function (a, b) { return (a.sort_order || 0) - (b.sort_order || 0); });
-  if (cats.length === 0) cats = DEF_CATEGORIES.map(function (c) { return Object.assign({}, c); });
-
-  var tasks = {};
-  (tRes.data || []).filter(function (t) { return !t.is_deleted; }).forEach(function (t) {
-    tasks[t.id] = { id: t.id, name: t.name, category: t.category_id, points: t.points };
-  });
-
-  var logs = (rRes.data || []).map(function (r) {
-    return { id: r.id, taskId: r.task_id, taskName: r.task_name_snapshot, category: r.category_id, date: r.date, seconds: r.seconds, time: r.time_label, points: r.points };
-  });
-
-  var rewards = (rwRes.data || []).filter(function (r) { return !r.is_deleted; });
-  if (rewards.length === 0) rewards = DEF_REWARDS.map(function (r) { return Object.assign({}, r); });
-
-  var pointHistory = (phRes.data || []).map(function (p) {
-    return { id: p.id, type: p.type, amount: p.amount, reason: p.reason, date: p.date };
-  });
-
-  var state = asRes.data || { total_points: 0, streak: 0, last_log_date: null };
-
-  return {
-    tasks: tasks,
-    logs: logs,
-    streak: state.streak || 0,
-    lastLogDate: state.last_log_date || "",
-    categories: cats,
-    points: state.total_points || 0,
-    pointHistory: pointHistory,
-    rewards: rewards,
-  };
-}
-
-// ═══════════════════════════════════════════════
-// Supabase: 状態全体を同期（upsert方式）
-// ═══════════════════════════════════════════════
-async function syncAllToSupabase(d) {
-  // categories
-  if (d.categories && d.categories.length > 0) {
-    var catsData = d.categories.map(function (c, i) {
-      return { id: c.id, name: c.name, emoji: c.emoji || null, color: c.color || null, sort_order: i, is_deleted: !!c.is_deleted };
-    });
-    await sb.from("categories").upsert(catsData);
-  }
-  // tasks
-  var tasksList = Object.values(d.tasks || {});
-  if (tasksList.length > 0) {
-    var tasksData = tasksList.map(function (t) {
-      return { id: t.id, category_id: t.category, name: t.name, points: t.points || 1, is_deleted: !!t.is_deleted };
-    });
-    await sb.from("tasks").upsert(tasksData);
-  }
-  // records
-  if (d.logs && d.logs.length > 0) {
-    var recsData = d.logs.map(function (l) {
-      return { id: l.id, task_id: l.taskId, task_name_snapshot: l.taskName, category_id: l.category, date: l.date, seconds: l.seconds, time_label: l.time, points: l.points };
-    });
-    await sb.from("records").upsert(recsData);
-  }
-  // rewards
-  if (d.rewards && d.rewards.length > 0) {
-    var rwData = d.rewards.map(function (r) {
-      return { id: r.id, name: r.name, emoji: r.emoji || null, cost: r.cost, is_deleted: !!r.is_deleted };
-    });
-    await sb.from("rewards").upsert(rwData);
-  }
-  // point_history
-  if (d.pointHistory && d.pointHistory.length > 0) {
-    var phData = d.pointHistory.map(function (p) {
-      return { id: p.id, type: p.type, amount: p.amount, reason: p.reason, date: p.date };
-    });
-    await sb.from("point_history").upsert(phData);
-  }
-  // app_state
-  await sb.from("app_state").upsert({
-    id: 1,
-    total_points: d.points || 0,
-    streak: d.streak || 0,
-    last_log_date: d.lastLogDate || null,
-    updated_at: new Date().toISOString(),
-  });
-}
-
-// ═══════════════════════════════════════════════
-// localStorage → Supabase 移行
-// ═══════════════════════════════════════════════
-async function migrateFromLocalStorage() {
-  var raw;
-  try { raw = localStorage.getItem(OLD_LS_KEY); } catch (e) { return null; }
-  if (!raw) return null;
-  var oldData;
-  try { oldData = JSON.parse(raw); } catch (e) { return null; }
-  if (!oldData || !oldData.tasks) return null;
-
-  // 旧データを正規化してSupabaseに投入
-  var d = {
-    tasks: oldData.tasks || {},
-    logs: oldData.logs || [],
-    streak: oldData.streak || 0,
-    lastLogDate: oldData.lastLogDate || "",
-    categories: oldData.categories && oldData.categories.length > 0 ? oldData.categories : DEF_CATEGORIES.map(function (c) { return Object.assign({}, c); }),
-    points: oldData.points || 0,
-    pointHistory: oldData.pointHistory || [],
-    rewards: oldData.rewards && oldData.rewards.length > 0 ? oldData.rewards : DEF_REWARDS.map(function (r) { return Object.assign({}, r); }),
-  };
-  await syncAllToSupabase(d);
-  // 完了マーク（再移行を防止）
-  try { localStorage.setItem(OLD_LS_KEY + "_migrated", new Date().toISOString()); } catch (e) {}
-  return d;
-}
-
-// ═══════════════════════════════════════════════
-// メインコンポーネント
-// ═══════════════════════════════════════════════
 export default function App() {
   var _gt = getToday(); NOW = _gt.now; TD = _gt.td;
-
-  var _d = useState(emptyData), data = _d[0], setData = _d[1];
+  var _d = useState(mkData), data = _d[0], setData = _d[1];
   var _r = useState(false), ready = _r[0], setReady = _r[1];
-  var _err = useState(null), err = _err[0], setErr = _err[1];
   var _t = useState("home"), tab = _t[0], setTab = _t[1];
   var _at = useState(null), addingTo = _at[0], setAddingTo = _at[1];
-  var _mig = useState(null), migPrompt = _mig[0], setMigPrompt = _mig[1];   // 移行確認用
-
-  // タイマー状態は端末固有なのでlocalStorage継続
+  // Running timers: { taskId: { startedAt: timestamp, elapsed: seconds } }
   var _savedTimer = (function () {
     try {
       var raw = localStorage.getItem(TK);
@@ -215,86 +79,67 @@ export default function App() {
     return null;
   })();
   var _run = useState(_savedTimer ? _savedTimer.running || {} : {}), running = _run[0], setRunning = _run[1];
+  // Paused timers: { taskId: elapsed }
   var _paused = useState(_savedTimer ? _savedTimer.paused || {} : {}), paused = _paused[0], setPaused = _paused[1];
   var tickRef = useRef(null);
   var _now = useState(Date.now()), nowMs = _now[0], setNowMs = _now[1];
 
-  // 1秒ごとに更新（稼働中タイマー用）
+  // Tick every second for running timers
   useEffect(function () {
     tickRef.current = setInterval(function () { setNowMs(Date.now()); }, 1000);
     return function () { clearInterval(tickRef.current); };
   }, []);
 
-  // タイマー状態をlocalStorageに保存
+  // Persist timer state to localStorage
   useEffect(function () {
-    try { localStorage.setItem(TK, JSON.stringify({ running: running, paused: paused })); } catch (e) {}
+    try {
+      localStorage.setItem(TK, JSON.stringify({ running: running, paused: paused }));
+    } catch (e) {}
   }, [running, paused]);
 
-  // ─── 初回ロード: Supabaseから読み込み ───
   useEffect(function () {
-    (async function () {
-      try {
-        var loaded = await loadAllFromSupabase();
-        // Supabaseが空 & localStorage に旧データあり → 移行を提案
-        var oldRaw = null;
-        try { oldRaw = localStorage.getItem(OLD_LS_KEY); } catch (e) {}
-        var alreadyMigrated = false;
-        try { alreadyMigrated = !!localStorage.getItem(OLD_LS_KEY + "_migrated"); } catch (e) {}
-        var sbIsEmpty = Object.keys(loaded.tasks).length === 0 && loaded.logs.length === 0;
-        if (sbIsEmpty && oldRaw && !alreadyMigrated) {
-          setMigPrompt(oldRaw);
-          setData(loaded);
-        } else {
-          setData(loaded);
+    try {
+      var raw = localStorage.getItem(SK);
+      if (raw) {
+        var p = JSON.parse(raw);
+        if (p && p.tasks) {
+          if (!p.logs) p.logs = [];
+          if (!p.streak) p.streak = 0;
+          if (!p.lastLogDate) p.lastLogDate = "";
+          if (!p.categories) p.categories = DEF_CATEGORIES.map(function (c) { return Object.assign({}, c); });
+          if (p.points === undefined) p.points = 0;
+          if (!p.pointHistory) p.pointHistory = [];
+          if (!p.rewards) p.rewards = DEF_REWARDS.map(function (r) { return Object.assign({}, r); });
+          if (!p.taskOrder) p.taskOrder = Object.keys(p.tasks);
+          setData(p);
         }
-        setReady(true);
-      } catch (e) {
-        console.error("Supabase load error:", e);
-        setErr("読み込み失敗: " + (e.message || e));
-        setReady(true);
       }
-    })();
+    } catch (e) { /* ignore */ }
+    setReady(true);
   }, []);
 
-  // ─── 保存: stateを即更新 + 非同期でSupabase同期 ───
   var save = useCallback(function (d) {
     setData(d);
-    syncAllToSupabase(d).catch(function (e) { console.error("Sync error:", e); });
+    try { localStorage.setItem(SK, JSON.stringify(d)); } catch (e) { }
   }, []);
 
-  // ─── 移行実行 ───
-  var doMigrate = async function () {
-    try {
-      setReady(false);
-      var d = await migrateFromLocalStorage();
-      if (d) setData(d);
-      setMigPrompt(null);
-      setReady(true);
-    } catch (e) {
-      console.error(e);
-      setErr("移行失敗: " + (e.message || e));
-      setReady(true);
-    }
-  };
-  var skipMigrate = function () {
-    try { localStorage.setItem(OLD_LS_KEY + "_migrated", "skipped " + new Date().toISOString()); } catch (e) {}
-    setMigPrompt(null);
-  };
-
-  // ─── タイマー操作 ───
+  // Get elapsed for a task
   function getElapsed(taskId) {
     var p = paused[taskId] || 0;
     var r = running[taskId];
     if (r) return p + Math.floor((nowMs - r) / 1000);
     return p;
   }
+
   function isRunning(taskId) { return !!running[taskId]; }
   function isPaused(taskId) { return !running[taskId] && (paused[taskId] || 0) > 0; }
+
   function startTask(taskId) {
     var r = Object.assign({}, running);
     r[taskId] = Date.now();
     setRunning(r);
   }
+
   function pauseTask(taskId) {
     var r = Object.assign({}, running);
     var p = Object.assign({}, paused);
@@ -306,14 +151,20 @@ export default function App() {
     setRunning(r);
     setPaused(p);
   }
-  function resumeTask(taskId) { startTask(taskId); }
+
+  function resumeTask(taskId) {
+    startTask(taskId);
+  }
+
   function finishTask(taskId) {
     var totalSec = getElapsed(taskId);
     var task = data.tasks[taskId];
     if (!task) return;
+
     var d = clone(data);
     var ptAmt = task.points || 1;
-    // 記録追加
+
+    // Add log
     d.logs.push({
       id: "log" + Date.now(),
       taskId: taskId,
@@ -324,23 +175,27 @@ export default function App() {
       time: new Date().toLocaleTimeString("ja-JP", { hour: "2-digit", minute: "2-digit" }),
       points: ptAmt,
     });
-    // ポイント加算
+
+    // Award points
     d.points = (d.points || 0) + ptAmt;
     if (!d.pointHistory) d.pointHistory = [];
     d.pointHistory.push({ type: "earn", amount: ptAmt, reason: task.name, date: TD, id: "pe" + Date.now() });
-    // streak更新
+
+    // Update streak
     if (d.lastLogDate === "") {
       d.streak = 1;
     } else if (d.lastLogDate === TD) {
-      // 同日なら変更なし
+      // same day, no change
     } else if (daysBetween(d.lastLogDate, TD) === 1) {
       d.streak += 1;
     } else if (daysBetween(d.lastLogDate, TD) > 1) {
       d.streak = 1;
     }
     d.lastLogDate = TD;
+
     save(d);
-    // タイマークリア
+
+    // Clear timer
     var r = Object.assign({}, running);
     var p = Object.assign({}, paused);
     delete r[taskId];
@@ -348,6 +203,7 @@ export default function App() {
     setRunning(r);
     setPaused(p);
   }
+
   function cancelTimer(taskId) {
     var r = Object.assign({}, running);
     var p = Object.assign({}, paused);
@@ -357,17 +213,26 @@ export default function App() {
     setPaused(p);
   }
 
-  // ─── カテゴリー・タスクの導出 ───
-  var cats = (data.categories || []).filter(function (c) { return !c.is_deleted; });
-  if (cats.length === 0) cats = DEF_CATEGORIES;
+  // Categories from data
+  var cats = (data.categories && data.categories.length > 0) ? data.categories : DEF_CATEGORIES;
+
+  // Tasks by category (ordered)
   var tasksByCategory = {};
   cats.forEach(function (c) { tasksByCategory[c.id] = []; });
-  Object.values(data.tasks).filter(function (t) { return !t.is_deleted; }).forEach(function (t) {
+  var order = data.taskOrder || [];
+  var allTasks = Object.values(data.tasks);
+  // Sort by taskOrder, unordered tasks go to end
+  allTasks.sort(function (a, b) {
+    var ai = order.indexOf(a.id); if (ai === -1) ai = 99999;
+    var bi = order.indexOf(b.id); if (bi === -1) bi = 99999;
+    return ai - bi;
+  });
+  allTasks.forEach(function (t) {
     if (tasksByCategory[t.category]) tasksByCategory[t.category].push(t);
-    else if (!tasksByCategory[t.category]) tasksByCategory[t.category] = [t];
+    else if (!tasksByCategory[t.category]) { tasksByCategory[t.category] = [t]; }
   });
 
-  // 今日のサマリー
+  // Today's stats
   var todayLogs = data.logs.filter(function (l) { return l.date === TD; });
   var todayCount = todayLogs.length;
   var todaySec = todayLogs.reduce(function (s, l) { return s + l.seconds; }, 0);
@@ -375,40 +240,15 @@ export default function App() {
   cats.forEach(function (c) { todayByCat[c.id] = 0; });
   todayLogs.forEach(function (l) { if (todayByCat[l.category] !== undefined) todayByCat[l.category] += l.seconds; });
 
+  // Any timers running?
   var runningCount = Object.keys(running).length;
 
-  // ─── ローディング画面 ───
   if (!ready) {
     return (
       <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", height: "100vh", background: "#FAFAF7" }}>
         <div style={{ fontSize: 50 }}>🏠</div>
         <div style={{ fontSize: 17, fontWeight: 800, marginTop: 12 }}>まどかの家事トラッカー</div>
         <div style={{ fontSize: 13, color: "#999", marginTop: 4 }}>読み込み中...</div>
-        {err && <div style={{ fontSize: 12, color: "#E53935", marginTop: 12, padding: 12, background: "#FFEBEE", borderRadius: 8 }}>{err}</div>}
-      </div>
-    );
-  }
-
-  // ─── 移行ダイアログ ───
-  if (migPrompt) {
-    return (
-      <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", minHeight: "100vh", background: "#FAFAF7", padding: 16 }}>
-        <div style={{ background: "#fff", borderRadius: 16, padding: 24, maxWidth: 400, width: "100%", boxShadow: "0 4px 12px rgba(0,0,0,.1)" }}>
-          <div style={{ fontSize: 30, textAlign: "center" }}>📦</div>
-          <div style={{ fontSize: 17, fontWeight: 800, textAlign: "center", marginTop: 8 }}>古いデータが見つかりました</div>
-          <div style={{ fontSize: 13, color: "#666", marginTop: 12, lineHeight: 1.6 }}>
-            このブラウザに保存されていた家事トラッカーのデータをSupabase（クラウド）に移行できます。<br /><br />
-            今後はSupabaseが正となり、複数端末から同じデータを見られるようになります。
-          </div>
-          <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 16 }}>
-            <button onClick={doMigrate} style={{ padding: 12, borderRadius: 10, border: "none", background: "#5D4037", color: "#fff", fontWeight: 800, fontSize: 14, cursor: "pointer" }}>
-              ☁️ クラウドに移行する
-            </button>
-            <button onClick={skipMigrate} style={{ padding: 12, borderRadius: 10, border: "1px solid #ddd", background: "#fff", color: "#999", fontWeight: 600, fontSize: 13, cursor: "pointer" }}>
-              スキップ（古いデータは無視）
-            </button>
-          </div>
-        </div>
       </div>
     );
   }
@@ -417,6 +257,7 @@ export default function App() {
     <div style={S.app}>
       <style>{cssText}</style>
 
+      {/* Header */}
       <header style={S.header}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
           <div>
@@ -433,7 +274,7 @@ export default function App() {
       <main style={{ padding: "6px 12px", paddingBottom: 70 }}>
         {tab === "home" && (
           <div style={{ animation: "fadeIn .3s ease" }}>
-            {/* 今日のサマリー */}
+            {/* Today Stats */}
             <div style={{ ...S.card, background: "linear-gradient(135deg, #E8F5E9, #fff)" }}>
               <div style={{ display: "flex", gap: 16, justifyContent: "center" }}>
                 <MStat l="タスク完了" v={todayCount + "個"} c="#4CAF50" />
@@ -443,14 +284,14 @@ export default function App() {
               </div>
             </div>
 
-            {/* 進行中タイマー */}
+            {/* Running Timers */}
             {runningCount > 0 && (
               <div style={S.card}>
                 <div style={S.cardTitle}>⏱️ 進行中</div>
                 {Object.keys(running).map(function (tid) {
                   var task = data.tasks[tid];
                   if (!task) return null;
-                  var cat = cats.find(function (c) { return c.id === task.category; }) || cats[cats.length - 1];
+                  var cat = cats.find(function (c) { return c.id === task.category; }) || cats[cats.length-1];
                   var el = getElapsed(tid);
                   return (
                     <div key={tid} style={{ padding: "10px 0", borderBottom: "1px solid #f3f3f3" }}>
@@ -471,14 +312,14 @@ export default function App() {
               </div>
             )}
 
-            {/* 一時停止中 */}
+            {/* Paused Timers */}
             {Object.keys(paused).filter(function (tid) { return !running[tid] && paused[tid] > 0; }).length > 0 && (
               <div style={S.card}>
                 <div style={S.cardTitle}>⏸ 一時停止中</div>
                 {Object.keys(paused).filter(function (tid) { return !running[tid] && paused[tid] > 0; }).map(function (tid) {
                   var task = data.tasks[tid];
                   if (!task) return null;
-                  var cat = cats.find(function (c) { return c.id === task.category; }) || cats[cats.length - 1];
+                  var cat = cats.find(function (c) { return c.id === task.category; }) || cats[cats.length-1];
                   return (
                     <div key={tid} style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 0", borderBottom: "1px solid #f3f3f3" }}>
                       <div style={{ fontSize: 20 }}>{cat.emoji}</div>
@@ -495,7 +336,7 @@ export default function App() {
               </div>
             )}
 
-            {/* クイックスタート */}
+            {/* Quick Start - Task Grid */}
             <div style={S.card}>
               <div style={S.cardTitle}>▶ 家事をはじめる</div>
               {cats.map(function (cat) {
@@ -526,13 +367,14 @@ export default function App() {
                   </div>
                 );
               })}
-              {Object.values(data.tasks).filter(function (t) { return !t.is_deleted; }).length === 0 && (
+              {Object.values(data.tasks).length === 0 && (
                 <div style={{ fontSize: 13, color: "#bbb", textAlign: "center", padding: 10 }}>
                   「タスク管理」タブからタスクを追加してください
                 </div>
               )}
             </div>
 
+            {/* Today Category Breakdown */}
             {todayCount > 0 && (
               <div style={S.card}>
                 <div style={S.cardTitle}>📊 今日のカテゴリー別</div>
@@ -553,11 +395,12 @@ export default function App() {
               </div>
             )}
 
+            {/* Today's Log */}
             {todayLogs.length > 0 && (
               <div style={S.card}>
                 <div style={S.cardTitle}>📜 今日の記録</div>
                 {todayLogs.slice().reverse().map(function (l) {
-                  var cat = cats.find(function (c) { return c.id === l.category; }) || cats[cats.length - 1];
+                  var cat = cats.find(function (c) { return c.id === l.category; }) || cats[cats.length-1];
                   return (
                     <div key={l.id} style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 0", borderBottom: "1px solid #f5f5f5", fontSize: 12 }}>
                       <span>{cat.emoji}</span>
@@ -570,6 +413,7 @@ export default function App() {
               </div>
             )}
 
+            {/* Weekly Overview */}
             <WeekView data={data} />
           </div>
         )}
@@ -588,31 +432,53 @@ export default function App() {
                       {tasks.length === 0 && (
                         <button onClick={function () {
                           var d = clone(data);
-                          d.categories = (d.categories || []).map(function (c) {
-                            return c.id === cat.id ? Object.assign({}, c, { is_deleted: true }) : c;
-                          });
+                          d.categories = (d.categories || []).filter(function (c) { return c.id !== cat.id; });
                           save(d);
                         }} style={{ ...S.addBtn, background: "#eee", color: "#999" }}>🗑</button>
                       )}
                     </div>
                   </div>
                   {addingTo === cat.id && <AddTaskForm cat={cat} data={data} save={save} onDone={function () { setAddingTo(null); }} />}
-                  {tasks.length > 0 ? tasks.map(function (t) {
-                    return <TaskListItem key={t.id} task={t} cat={cat} data={data} save={save} />;
+                  {tasks.length > 0 ? tasks.map(function (t, idx) {
+                    return <TaskListItem key={t.id} task={t} cat={cat} data={data} save={save} isFirst={idx === 0} isLast={idx === tasks.length - 1} onMove={function (taskId, dir) {
+                      var d = clone(data);
+                      if (!d.taskOrder) d.taskOrder = Object.keys(d.tasks);
+                      var catTasks = tasks.map(function (tt) { return tt.id; });
+                      var i = catTasks.indexOf(taskId);
+                      if (i === -1) return;
+                      var j = i + dir;
+                      if (j < 0 || j >= catTasks.length) return;
+                      // Swap in the global taskOrder
+                      var gi = d.taskOrder.indexOf(catTasks[i]);
+                      var gj = d.taskOrder.indexOf(catTasks[j]);
+                      if (gi === -1 || gj === -1) return;
+                      var tmp = d.taskOrder[gi];
+                      d.taskOrder[gi] = d.taskOrder[gj];
+                      d.taskOrder[gj] = tmp;
+                      save(d);
+                    }} />;
                   }) : (
                     <div style={{ fontSize: 12, color: "#ccc", padding: "4px 0" }}>タスクを追加してください</div>
                   )}
                 </div>
               );
             })}
+
+            {/* Add Category */}
             <AddCategoryForm data={data} save={save} cats={cats} />
           </div>
         )}
 
-        {tab === "rewards" && <RewardsTab data={data} save={save} />}
-        {tab === "stats" && <StatsTab data={data} cats={cats} save={save} />}
+        {tab === "rewards" && (
+          <RewardsTab data={data} save={save} />
+        )}
+
+        {tab === "stats" && (
+          <StatsTab data={data} cats={cats} save={save} />
+        )}
       </main>
 
+      {/* Nav */}
       <nav style={S.nav}>
         {[
           { id: "home", icon: "🏠", l: "ホーム" },
@@ -632,11 +498,8 @@ export default function App() {
   );
 }
 
-// ═══════════════════════════════════════════════
-// 部品コンポーネント
-// ═══════════════════════════════════════════════
 function TaskListItem(p) {
-  var task = p.task, cat = p.cat, data = p.data, save = p.save;
+  var task = p.task, cat = p.cat, data = p.data, save = p.save, isFirst = p.isFirst, isLast = p.isLast, onMove = p.onMove;
   const [editing, setEditing] = useState(false);
   const [pts, setPts] = useState(String(task.points || 1));
 
@@ -646,14 +509,20 @@ function TaskListItem(p) {
     save(d);
     setEditing(false);
   };
+
   var del = function () {
     var d = clone(data);
-    if (d.tasks[task.id]) d.tasks[task.id].is_deleted = true;  // ソフトデリート
+    delete d.tasks[task.id];
+    if (d.taskOrder) d.taskOrder = d.taskOrder.filter(function (id) { return id !== task.id; });
     save(d);
   };
 
   return (
-    <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "7px 0", borderBottom: "1px solid #f5f5f5" }}>
+    <div style={{ display: "flex", alignItems: "center", gap: 6, padding: "7px 0", borderBottom: "1px solid #f5f5f5" }}>
+      <div style={{ display: "flex", flexDirection: "column", gap: 1 }}>
+        <button onClick={function () { if (!isFirst) onMove(task.id, -1); }} disabled={isFirst} style={{ background: "none", border: "none", fontSize: 10, cursor: isFirst ? "default" : "pointer", color: isFirst ? "#e0e0e0" : "#aaa", padding: 0, lineHeight: 1 }}>▲</button>
+        <button onClick={function () { if (!isLast) onMove(task.id, 1); }} disabled={isLast} style={{ background: "none", border: "none", fontSize: 10, cursor: isLast ? "default" : "pointer", color: isLast ? "#e0e0e0" : "#aaa", padding: 0, lineHeight: 1 }}>▼</button>
+      </div>
       <span style={{ fontSize: 12, color: cat.color, fontWeight: 700 }}>●</span>
       <span style={{ flex: 1, fontSize: 13, fontWeight: 600 }}>{task.name}</span>
       {editing ? (
@@ -679,6 +548,8 @@ function AddTaskForm(p) {
     var d = clone(data);
     var id = "task" + Date.now();
     d.tasks[id] = { id: id, name: name.trim(), category: cat.id, points: parseInt(pts) || 1 };
+    if (!d.taskOrder) d.taskOrder = [];
+    d.taskOrder.push(id);
     save(d);
     setName("");
     setPts("1");
@@ -707,8 +578,7 @@ function RewardsTab(p) {
   const [editCost, setEditCost] = useState("");
 
   var pts = data.points || 0;
-  var rewards = (data.rewards || []).filter(function (r) { return !r.is_deleted; });
-  if (rewards.length === 0) rewards = DEF_REWARDS;
+  var rewards = data.rewards || DEF_REWARDS;
   var hist = data.pointHistory || [];
 
   var exchange = function (r) {
@@ -720,6 +590,7 @@ function RewardsTab(p) {
     save(d);
     setConfirm(null);
   };
+
   var addR = function () {
     if (!rN.trim()) return;
     var d = clone(data);
@@ -728,13 +599,13 @@ function RewardsTab(p) {
     save(d);
     setRN(""); setRC("50"); setRE("🎁"); setShowAdd(false);
   };
+
   var delR = function (rid) {
     var d = clone(data);
-    d.rewards = (d.rewards || []).map(function (r) {
-      return r.id === rid ? Object.assign({}, r, { is_deleted: true }) : r;
-    });
+    d.rewards = (d.rewards || []).filter(function (r) { return r.id !== rid; });
     save(d);
   };
+
   var saveRewardCost = function (rid) {
     var d = clone(data);
     d.rewards = (d.rewards || []).map(function (r) {
@@ -830,8 +701,7 @@ function AddCategoryForm(p) {
     if (!name.trim()) return;
     var d = clone(data);
     if (!d.categories) d.categories = cats.map(function (c) { return Object.assign({}, c); });
-    var visibleCount = d.categories.filter(function (c) { return !c.is_deleted; }).length;
-    var colorIdx = visibleCount % CAT_COLORS.length;
+    var colorIdx = d.categories.length % CAT_COLORS.length;
     d.categories.push({ id: "cat" + Date.now(), name: name.trim(), emoji: emoji || "📁", color: CAT_COLORS[colorIdx] });
     save(d);
     setName("");
@@ -883,6 +753,7 @@ function StatsTab(p) {
   var monthSec = monthLogs.reduce(function (s, l) { return s + l.seconds; }, 0);
   var monthPts = monthLogs.reduce(function (s, l) { return s + (l.points || 1); }, 0);
 
+  // Build calendar
   var calDays = [];
   for (var i = 0; i < startPad; i++) calDays.push(null);
   for (var d = 1; d <= daysInMonth; d++) {
@@ -890,13 +761,17 @@ function StatsTab(p) {
     var dayLogs = logs.filter(function (l) { return l.date === ds; });
     calDays.push({ date: ds, day: d, count: dayLogs.length, sec: dayLogs.reduce(function (s, l) { return s + l.seconds; }, 0), logs: dayLogs });
   }
+
   var activeDays = calDays.filter(function (d) { return d && d.count > 0; }).length;
+
+  // Selected day logs
   var selLogs = selectedDay ? logs.filter(function (l) { return l.date === selectedDay; }) : [];
 
   return (
     <div style={{ animation: "fadeIn .3s ease" }}>
       <h2 style={{ fontSize: 17, fontWeight: 800, marginBottom: 12 }}>📊 ふりかえり</h2>
 
+      {/* Streak */}
       <div style={{ ...S.card, textAlign: "center", background: "linear-gradient(135deg, #FFF3E0, #fff)", padding: 16 }}>
         <div style={{ display: "flex", gap: 16, justifyContent: "center" }}>
           <MStat l="連続記録" v={data.streak + "日🔥"} c="#FF9800" />
@@ -905,12 +780,14 @@ function StatsTab(p) {
         </div>
       </div>
 
+      {/* Month Navigation */}
       <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 12, marginBottom: 10 }}>
         <button onClick={function () { if (monthOffset > -11) setMonthOffset(monthOffset - 1); setSelectedDay(null); }} style={{ background: "none", border: "none", fontSize: 20, cursor: "pointer", opacity: monthOffset > -11 ? 1 : .3 }}>◀</button>
         <div style={{ fontSize: 16, fontWeight: 800, minWidth: 120, textAlign: "center" }}>{viewYear}年{viewMonth + 1}月</div>
         <button onClick={function () { if (monthOffset < 0) setMonthOffset(monthOffset + 1); setSelectedDay(null); }} style={{ background: "none", border: "none", fontSize: 20, cursor: "pointer", opacity: monthOffset < 0 ? 1 : .3 }}>▶</button>
       </div>
 
+      {/* Month Summary */}
       <div style={{ ...S.card, background: "linear-gradient(135deg, #E8F5E9, #fff)" }}>
         <div style={{ display: "flex", gap: 12, justifyContent: "center" }}>
           <MStat l="タスク" v={monthLogs.length + "回"} c="#4CAF50" />
@@ -920,6 +797,7 @@ function StatsTab(p) {
         </div>
       </div>
 
+      {/* Calendar */}
       <div style={S.card}>
         <div style={S.cardTitle}>📅 カレンダー（日付をタップで詳細）</div>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(7, 1fr)", gap: 2 }}>
@@ -946,6 +824,7 @@ function StatsTab(p) {
         </div>
       </div>
 
+      {/* Selected Day Detail */}
       {selectedDay && (
         <div style={S.card}>
           <div style={S.cardTitle}>📋 {parseInt(selectedDay.split("-")[1])}月{parseInt(selectedDay.split("-")[2])}日の記録</div>
@@ -1006,6 +885,7 @@ function StatsTab(p) {
         </div>
       )}
 
+      {/* Category breakdown for the month */}
       <div style={S.card}>
         <div style={S.cardTitle}>📊 {viewMonth + 1}月のカテゴリー別</div>
         {cats.map(function (cat) {
@@ -1031,6 +911,7 @@ function StatsTab(p) {
 
 function WeekView(p) {
   var data = p.data;
+  // Last 7 days
   var days = [];
   for (var i = 6; i >= 0; i--) {
     var d = new Date(NOW);
@@ -1040,6 +921,7 @@ function WeekView(p) {
     var sec = dayLogs.reduce(function (s, l) { return s + l.seconds; }, 0);
     days.push({ date: ds, count: dayLogs.length, sec: sec, label: (d.getMonth() + 1) + "/" + d.getDate(), day: DJ[d.getDay()] });
   }
+
   var maxSec = Math.max.apply(null, days.map(function (d) { return d.sec; }).concat([1]));
 
   return (
