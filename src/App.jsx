@@ -57,6 +57,24 @@ function daysBetween(a, b) {
   var d1 = new Date(a); var d2 = new Date(b);
   return Math.round((d2 - d1) / 86400000);
 }
+// 記録(logs)から連続記録(streak)を計算し直す。
+// 今日（記録が無ければ昨日）を起点に、連続して記録のある日数を数える。
+// これにより、過去日に後から記録を追加してもstreakが正しく反映される。
+function recalcStreak(logs) {
+  var active = {};
+  (logs || []).forEach(function (l) { if (l.date) active[l.date] = true; });
+  function dstr(dt) {
+    return dt.getFullYear() + "-" + String(dt.getMonth() + 1).padStart(2, "0") + "-" + String(dt.getDate()).padStart(2, "0");
+  }
+  var cur = new Date(NOW.getFullYear(), NOW.getMonth(), NOW.getDate());
+  if (!active[dstr(cur)]) {
+    cur.setDate(cur.getDate() - 1);
+    if (!active[dstr(cur)]) return 0;
+  }
+  var s = 0;
+  while (active[dstr(cur)]) { s++; cur.setDate(cur.getDate() - 1); }
+  return s;
+}
 
 // ═══ Supabase: 全データ読み込み ═══
 async function loadAllFromSupabase() {
@@ -313,16 +331,8 @@ export default function App() {
     d.points = (d.points || 0) + ptAmt;
     if (!d.pointHistory) d.pointHistory = [];
     d.pointHistory.push({ type: "earn", amount: ptAmt, reason: task.name, date: TD, id: "pe" + Date.now() });
-    if (d.lastLogDate === "") {
-      d.streak = 1;
-    } else if (d.lastLogDate === TD) {
-      // same day, no change
-    } else if (daysBetween(d.lastLogDate, TD) === 1) {
-      d.streak += 1;
-    } else if (daysBetween(d.lastLogDate, TD) > 1) {
-      d.streak = 1;
-    }
     d.lastLogDate = TD;
+    d.streak = recalcStreak(d.logs);
     save(d);
     var r = Object.assign({}, running);
     var p = Object.assign({}, paused);
@@ -849,6 +859,7 @@ function StatsTab(p) {
   const [editingLog, setEditingLog] = useState(null);
   const [editH, setEditH] = useState("");
   const [editM, setEditM] = useState("");
+  const [showAddRec, setShowAddRec] = useState(false);
   var viewDate = new Date(NOW.getFullYear(), NOW.getMonth() + monthOffset, 1);
   var viewYear = viewDate.getFullYear();
   var viewMonth = viewDate.getMonth();
@@ -879,9 +890,9 @@ function StatsTab(p) {
         </div>
       </div>
       <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 12, marginBottom: 10 }}>
-        <button onClick={function () { if (monthOffset > -11) setMonthOffset(monthOffset - 1); setSelectedDay(null); }} style={{ background: "none", border: "none", fontSize: 20, cursor: "pointer", opacity: monthOffset > -11 ? 1 : .3 }}>◀</button>
+        <button onClick={function () { if (monthOffset > -11) setMonthOffset(monthOffset - 1); setSelectedDay(null); setShowAddRec(false); }} style={{ background: "none", border: "none", fontSize: 20, cursor: "pointer", opacity: monthOffset > -11 ? 1 : .3 }}>◀</button>
         <div style={{ fontSize: 16, fontWeight: 800, minWidth: 120, textAlign: "center" }}>{viewYear}年{viewMonth + 1}月</div>
-        <button onClick={function () { if (monthOffset < 0) setMonthOffset(monthOffset + 1); setSelectedDay(null); }} style={{ background: "none", border: "none", fontSize: 20, cursor: "pointer", opacity: monthOffset < 0 ? 1 : .3 }}>▶</button>
+        <button onClick={function () { if (monthOffset < 0) setMonthOffset(monthOffset + 1); setSelectedDay(null); setShowAddRec(false); }} style={{ background: "none", border: "none", fontSize: 20, cursor: "pointer", opacity: monthOffset < 0 ? 1 : .3 }}>▶</button>
       </div>
       <div style={{ ...S.card, background: "linear-gradient(135deg, #E8F5E9, #fff)" }}>
         <div style={{ display: "flex", gap: 12, justifyContent: "center" }}>
@@ -903,7 +914,7 @@ function StatsTab(p) {
             var isSel = md.date === selectedDay;
             var hasAct = md.count > 0;
             return (
-              <div key={md.date} onClick={function () { setSelectedDay(isSel ? null : md.date); }} style={{ textAlign: "center", padding: 3, borderRadius: 6, cursor: "pointer", background: isSel ? "#5D4037" : isToday ? "#5D403715" : hasAct ? "#E8F5E9" : "transparent", border: isToday && !isSel ? "2px solid #5D4037" : "2px solid transparent", minHeight: 36 }}>
+              <div key={md.date} onClick={function () { setSelectedDay(isSel ? null : md.date); setShowAddRec(false); setEditingLog(null); }} style={{ textAlign: "center", padding: 3, borderRadius: 6, cursor: "pointer", background: isSel ? "#5D4037" : isToday ? "#5D403715" : hasAct ? "#E8F5E9" : "transparent", border: isToday && !isSel ? "2px solid #5D4037" : "2px solid transparent", minHeight: 36 }}>
                 <div style={{ fontSize: 11, fontWeight: isToday || isSel ? 800 : 400, color: isSel ? "#fff" : isToday ? "#5D4037" : "#555" }}>{md.day}</div>
                 {hasAct && !isSel && (<div style={{ marginTop: 1 }}><div style={{ fontSize: 7, color: "#4CAF50", fontWeight: 700 }}>{md.count}個</div></div>)}
                 {isSel && <div style={{ fontSize: 7, color: "#fff" }}>{md.count}個</div>}
@@ -914,8 +925,15 @@ function StatsTab(p) {
       </div>
       {selectedDay && (
         <div style={S.card}>
-          <div style={S.cardTitle}>📋 {parseInt(selectedDay.split("-")[1])}月{parseInt(selectedDay.split("-")[2])}日の記録</div>
-          {selLogs.length === 0 && <div style={{ fontSize: 12, color: "#ccc" }}>この日の記録はありません</div>}
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+            <div style={{ ...S.cardTitle, marginBottom: 0 }}>📋 {parseInt(selectedDay.split("-")[1])}月{parseInt(selectedDay.split("-")[2])}日の記録</div>
+            {selectedDay <= TD && (
+              <button onClick={function () { setShowAddRec(!showAddRec); setEditingLog(null); }} style={{ ...S.addBtn, background: "#4CAF50" }}>{showAddRec ? "✕" : "＋ 記録を追加"}</button>
+            )}
+          </div>
+          {selectedDay > TD && <div style={{ fontSize: 11, color: "#bbb", marginBottom: 8 }}>未来の日付には記録を追加できません</div>}
+          {showAddRec && selectedDay <= TD && <AddRecordForm data={data} save={save} cats={cats} date={selectedDay} onDone={function () { setShowAddRec(false); }} />}
+          {selLogs.length === 0 && !showAddRec && <div style={{ fontSize: 12, color: "#ccc" }}>この日の記録はありません</div>}
           {selLogs.map(function (l) {
             var cat = cats.find(function (c) { return c.id === l.category; }) || cats[cats.length - 1];
             var isEditing = editingLog === l.id;
@@ -944,6 +962,16 @@ function StatsTab(p) {
                           setEditingLog(null);
                         }} style={{ background: "#4CAF50", color: "#fff", border: "none", borderRadius: 5, padding: "3px 8px", fontSize: 10, fontWeight: 700, cursor: "pointer" }}>✓</button>
                         <button onClick={function () { setEditingLog(null); }} style={{ background: "#eee", color: "#999", border: "none", borderRadius: 5, padding: "3px 8px", fontSize: 10, fontWeight: 700, cursor: "pointer" }}>✕</button>
+                        <button onClick={function () {
+                          if (!window.confirm("この記録を削除しますか？（ポイントも取り消されます）")) return;
+                          var d = clone(data);
+                          d.logs = d.logs.filter(function (lg) { return lg.id !== l.id; });
+                          d.points = Math.max(0, (d.points || 0) - (l.points || 1));
+                          d.streak = recalcStreak(d.logs);
+                          save(d);
+                          sb.from("records").delete().eq("id", l.id).then(function (res) { if (res && res.error) console.error("record delete error:", res.error); });
+                          setEditingLog(null);
+                        }} style={{ background: "#E53935", color: "#fff", border: "none", borderRadius: 5, padding: "3px 8px", fontSize: 10, fontWeight: 700, cursor: "pointer" }}>🗑 削除</button>
                       </div>
                     </div>
                   ) : (
@@ -989,6 +1017,59 @@ function StatsTab(p) {
           );
         })}
         {monthLogs.length === 0 && <div style={{ fontSize: 12, color: "#ccc" }}>この月の記録はありません</div>}
+      </div>
+    </div>
+  );
+}
+
+// 選んだ日（過去日も可）に手動で家事記録を追加するフォーム
+function AddRecordForm(p) {
+  var data = p.data, save = p.save, cats = p.cats, date = p.date, onDone = p.onDone;
+  var order = data.taskOrder || [];
+  var tasks = Object.values(data.tasks || {}).filter(function (t) { return !t.is_deleted; });
+  tasks.sort(function (a, b) {
+    var ai = order.indexOf(a.id); if (ai === -1) ai = 99999;
+    var bi = order.indexOf(b.id); if (bi === -1) bi = 99999;
+    return ai - bi;
+  });
+  const [tid, setTid] = useState(tasks.length ? tasks[0].id : "");
+  const [h, setH] = useState("0");
+  const [m, setM] = useState("0");
+  function catOf(t) { return cats.find(function (c) { return c.id === t.category; }) || cats[cats.length - 1] || { emoji: "📦", name: "" }; }
+  var add = function () {
+    var task = data.tasks[tid];
+    if (!task) return;
+    var sec = (Math.max(0, parseInt(h) || 0) * 3600) + (Math.max(0, Math.min(59, parseInt(m) || 0)) * 60);
+    var d = clone(data);
+    var ptAmt = task.points || 1;
+    d.logs.push({ id: "log" + Date.now(), taskId: task.id, taskName: task.name, category: task.category, date: date, seconds: sec, time: "手動", points: ptAmt });
+    d.points = (d.points || 0) + ptAmt;
+    if (!d.pointHistory) d.pointHistory = [];
+    d.pointHistory.push({ type: "earn", amount: ptAmt, reason: task.name, date: date, id: "pe" + Date.now() });
+    if (!d.lastLogDate || date > d.lastLogDate) d.lastLogDate = date;
+    d.streak = recalcStreak(d.logs);
+    save(d);
+    setH("0"); setM("0");
+    if (onDone) onDone();
+  };
+  if (tasks.length === 0) {
+    return <div style={{ fontSize: 12, color: "#bbb", padding: "6px 0" }}>先に「タスク管理」でタスクを追加してください</div>;
+  }
+  return (
+    <div style={{ padding: 10, background: "#f1f8f1", borderRadius: 10, marginBottom: 10 }}>
+      <div style={{ fontSize: 11, color: "#888", marginBottom: 6 }}>この日にやった家事を記録します（時間が分からなければ0でもOK）</div>
+      <select value={tid} onChange={function (e) { setTid(e.target.value); }} style={{ ...S.input, width: "100%", marginBottom: 6 }}>
+        {tasks.map(function (t) {
+          var c = catOf(t);
+          return <option key={t.id} value={t.id}>{c.emoji} {t.name}（+{t.points || 1}pt）</option>;
+        })}
+      </select>
+      <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+        <input type="number" min="0" value={h} onChange={function (e) { setH(e.target.value); }} style={{ ...S.input, width: 48, flex: "none", textAlign: "center" }} />
+        <span style={{ fontSize: 12, color: "#888" }}>時間</span>
+        <input type="number" min="0" max="59" value={m} onChange={function (e) { setM(e.target.value); }} style={{ ...S.input, width: 48, flex: "none", textAlign: "center" }} />
+        <span style={{ fontSize: 12, color: "#888" }}>分</span>
+        <button onClick={add} style={{ ...S.smBtn, background: "#4CAF50", color: "#fff", flex: 1 }}>記録する</button>
       </div>
     </div>
   );
