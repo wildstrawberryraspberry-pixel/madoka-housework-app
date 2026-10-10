@@ -35,6 +35,11 @@ function getToday() {
 }
 var NOW = new Date();
 var TD = getToday().td;
+// ミリ秒 → "YYYY-MM-DD"（端末のローカル日付）
+function ymdOf(ms) {
+  var n = new Date(ms);
+  return n.getFullYear() + "-" + String(n.getMonth() + 1).padStart(2, "0") + "-" + String(n.getDate()).padStart(2, "0");
+}
 
 function emptyData() {
   return { tasks: {}, taskOrder: [], logs: [], streak: 0, lastLogDate: "", categories: DEF_CATEGORIES.map(function (c) { return Object.assign({}, c); }), points: 0, pointHistory: [], rewards: DEF_REWARDS.map(function (r) { return Object.assign({}, r); }) };
@@ -227,6 +232,8 @@ export default function App() {
   })();
   var _run = useState(_savedTimer ? _savedTimer.running || {} : {}), running = _run[0], setRunning = _run[1];
   var _paused = useState(_savedTimer ? _savedTimer.paused || {} : {}), paused = _paused[0], setPaused = _paused[1];
+  // 家事を最初に開始した時刻（一時停止→再開しても変えない）。日をまたいで完了しても開始日に記録するため
+  var _started = useState(_savedTimer ? _savedTimer.startedAt || {} : {}), startedAt = _started[0], setStartedAt = _started[1];
   var tickRef = useRef(null);
   var _now = useState(Date.now()), nowMs = _now[0], setNowMs = _now[1];
 
@@ -236,8 +243,8 @@ export default function App() {
   }, []);
 
   useEffect(function () {
-    try { localStorage.setItem(TK, JSON.stringify({ running: running, paused: paused })); } catch (e) {}
-  }, [running, paused]);
+    try { localStorage.setItem(TK, JSON.stringify({ running: running, paused: paused, startedAt: startedAt })); } catch (e) {}
+  }, [running, paused, startedAt]);
 
   // 初回ロード
   useEffect(function () {
@@ -299,6 +306,25 @@ export default function App() {
     var r = Object.assign({}, running);
     r[taskId] = Date.now();
     setRunning(r);
+    if (!startedAt[taskId] && !(paused[taskId] > 0)) {
+      var st = Object.assign({}, startedAt);
+      st[taskId] = Date.now();
+      setStartedAt(st);
+    }
+  }
+  // 開始時刻（ms）。この更新より前に始めたタイマーは経過時間から逆算
+  function getStartMs(taskId) {
+    if (startedAt[taskId]) return startedAt[taskId];
+    var p = paused[taskId] || 0;
+    if (running[taskId]) return running[taskId] - p * 1000;
+    return Date.now() - p * 1000;
+  }
+  function getStartDate(taskId) { return ymdOf(getStartMs(taskId)); }
+  function clearStarted(taskId) {
+    if (!startedAt[taskId]) return;
+    var st = Object.assign({}, startedAt);
+    delete st[taskId];
+    setStartedAt(st);
   }
   function pauseTask(taskId) {
     var r = Object.assign({}, running);
@@ -318,20 +344,27 @@ export default function App() {
     if (!task) return;
     var d = clone(data);
     var ptAmt = task.points || 1;
+    // 記録日＝家事を開始した日（終了を押し忘れて日をまたいでも、開始日に記録）
+    var startMs = getStartMs(taskId);
+    var logDate = ymdOf(startMs);
+    if (logDate > TD) logDate = TD;
+    var crossed = logDate !== TD;
+    var hm = function (ms) { return new Date(ms).toLocaleTimeString("ja-JP", { hour: "2-digit", minute: "2-digit" }); };
     d.logs.push({
       id: "log" + Date.now(),
       taskId: taskId,
       taskName: task.name,
       category: task.category,
-      date: TD,
+      date: logDate,
       seconds: totalSec,
-      time: new Date().toLocaleTimeString("ja-JP", { hour: "2-digit", minute: "2-digit" }),
+      // 日をまたいだときは開始時刻を記録（例 "21:30〜"）
+      time: crossed ? hm(startMs) + "〜" : hm(Date.now()),
       points: ptAmt,
     });
     d.points = (d.points || 0) + ptAmt;
     if (!d.pointHistory) d.pointHistory = [];
-    d.pointHistory.push({ type: "earn", amount: ptAmt, reason: task.name, date: TD, id: "pe" + Date.now() });
-    d.lastLogDate = TD;
+    d.pointHistory.push({ type: "earn", amount: ptAmt, reason: task.name, date: logDate, id: "pe" + Date.now() });
+    if (!d.lastLogDate || logDate > d.lastLogDate) d.lastLogDate = logDate;
     d.streak = recalcStreak(d.logs);
     save(d);
     var r = Object.assign({}, running);
@@ -340,6 +373,7 @@ export default function App() {
     delete p[taskId];
     setRunning(r);
     setPaused(p);
+    clearStarted(taskId);
   }
   function cancelTimer(taskId) {
     var r = Object.assign({}, running);
@@ -348,6 +382,7 @@ export default function App() {
     delete p[taskId];
     setRunning(r);
     setPaused(p);
+    clearStarted(taskId);
   }
 
   // Categories
@@ -452,6 +487,7 @@ export default function App() {
                         <div style={{ width: 36, height: 36, borderRadius: 10, background: cat.color + "20", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 20 }}>{cat.emoji}</div>
                         <div style={{ flex: 1 }}>
                           <div style={{ fontWeight: 700, fontSize: 14 }}>{task.name}</div>
+                          {getStartDate(tid) !== TD && <div style={{ fontSize: 11, color: "#E53935", fontWeight: 700 }}>⚠️ {Number(getStartDate(tid).slice(5, 7))}/{Number(getStartDate(tid).slice(8, 10))}に開始 → 完了するとその日に記録</div>}
                           <div style={{ fontSize: 24, fontWeight: 900, color: cat.color, fontVariantNumeric: "tabular-nums" }}>{fmtSec(el)}</div>
                         </div>
                         <div style={{ display: "flex", gap: 4 }}>
@@ -476,6 +512,7 @@ export default function App() {
                       <div style={{ fontSize: 20 }}>{cat.emoji}</div>
                       <div style={{ flex: 1 }}>
                         <div style={{ fontWeight: 600, fontSize: 13 }}>{task.name}</div>
+                        {getStartDate(tid) !== TD && <div style={{ fontSize: 11, color: "#E53935", fontWeight: 700 }}>⚠️ {Number(getStartDate(tid).slice(5, 7))}/{Number(getStartDate(tid).slice(8, 10))}に開始 → 完了するとその日に記録</div>}
                         <div style={{ fontSize: 16, fontWeight: 800, color: "#999" }}>{fmtSec(paused[tid])}</div>
                       </div>
                       <button onClick={function () { resumeTask(tid); }} style={{ ...S.smBtn, background: cat.color, color: "#fff" }}>▶ 再開</button>
