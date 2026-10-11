@@ -126,8 +126,25 @@ async function loadAllFromSupabase() {
     points: state.total_points || 0,
     pointHistory: pointHistory,
     rewards: rewards,
+    _timers: {
+      running: state.running_timers || {},
+      paused: state.paused_timers || {},
+      startedAt: state.started_timers || {},
+    },
   };
 }
+
+// ═══ タイマー状態（Apple Watch / Siri と共有するため Supabase の app_state に保存）═══
+// fn(cur) は cur = {running, paused, startedAt} を書き換える関数。最新のサーバー値に適用して保存する
+async function pushTimersToSupabase(fn) {
+  var r = await sb.from("app_state").select("running_timers,paused_timers,started_timers").eq("id", 1).maybeSingle();
+  var s = (r && r.data) || {};
+  var cur = { running: Object.assign({}, s.running_timers || {}), paused: Object.assign({}, s.paused_timers || {}), startedAt: Object.assign({}, s.started_timers || {}) };
+  fn(cur);
+  var u = await sb.from("app_state").update({ running_timers: cur.running, paused_timers: cur.paused, started_timers: cur.startedAt }).eq("id", 1);
+  if (u && u.error) console.error("timer sync error:", u.error);
+}
+function sameJson(a, b) { return JSON.stringify(a || {}) === JSON.stringify(b || {}); }
 
 // ═══ Supabase: 状態全体を同期 ═══
 async function syncAllToSupabase(d) {
@@ -255,6 +272,8 @@ export default function App() {
         try { oldRaw = localStorage.getItem(OLD_LS_KEY); } catch (e) {}
         var alreadyMigrated = false;
         try { alreadyMigrated = !!localStorage.getItem(OLD_LS_KEY + "_migrated"); } catch (e) {}
+        applyServerTimers(loaded._timers, true);
+        delete loaded._timers;
         var sbIsEmpty = Object.keys(loaded.tasks).length === 0 && loaded.logs.length === 0;
         if (sbIsEmpty && oldRaw && !alreadyMigrated) {
           setMigPrompt(oldRaw);
@@ -271,10 +290,77 @@ export default function App() {
     })();
   }, []);
 
+  var syncingRef = useRef(0);
+  var lastLocalRef = useRef(0);
   var save = useCallback(function (d) {
     setData(d);
-    syncAllToSupabase(d).catch(function (e) { console.error("Sync error:", e); });
+    syncingRef.current++;
+    lastLocalRef.current = Date.now();
+    syncAllToSupabase(d).catch(function (e) { console.error("Sync error:", e); })
+      .then(function () { syncingRef.current--; lastLocalRef.current = Date.now(); });
   }, []);
+
+  // サーバーのタイマー状態を画面に反映（Watchで開始/終了したもの）
+  // isFirst: 初回ロード。サーバーが空でこの端末に動いているタイマーがあれば、サーバーへ引き継ぐ
+  function applyServerTimers(t, isFirst) {
+    if (!t) return;
+    var serverEmpty = Object.keys(t.running).length === 0 && Object.keys(t.paused).length === 0;
+    var localHas = Object.keys(running).length > 0 || Object.keys(paused).length > 0;
+    // この端末のタイマーをサーバーへ引き継ぐのは、この版を初めて開いたときの1回だけ
+    // （以後はサーバーが正。Watchで終えたタイマーがスマホの古い控えで復活しないように）
+    var migrated = false;
+    try { migrated = !!localStorage.getItem(TK + "_cloud"); localStorage.setItem(TK + "_cloud", "1"); } catch (e) {}
+    if (isFirst && !migrated && serverEmpty && localHas) {
+      var loc = { running: running, paused: paused, startedAt: startedAt };
+      pushTimersToSupabase(function (cur) { cur.running = loc.running; cur.paused = loc.paused; cur.startedAt = loc.startedAt; }).catch(function (e) { console.error(e); });
+      return;
+    }
+    setRunning(function (prev) { return sameJson(prev, t.running) ? prev : t.running; });
+    setPaused(function (prev) { return sameJson(prev, t.paused) ? prev : t.paused; });
+    setStartedAt(function (prev) { return sameJson(prev, t.startedAt) ? prev : t.startedAt; });
+  }
+  // タイマー操作：画面にすぐ反映 → サーバーの最新値にも同じ操作を適用
+  function applyTimers(fn) {
+    var cur = { running: Object.assign({}, running), paused: Object.assign({}, paused), startedAt: Object.assign({}, startedAt) };
+    fn(cur);
+    setRunning(cur.running); setPaused(cur.paused); setStartedAt(cur.startedAt);
+    lastLocalRef.current = Date.now();
+    pushTimersToSupabase(fn).catch(function (e) { console.error("timer sync error:", e); })
+      .then(function () { lastLocalRef.current = Date.now(); });
+  }
+
+  // 定期確認（10秒ごと＋アプリを開き直したとき）：Watchからの開始・完了を取り込む
+  var dataRef = useRef(data); dataRef.current = data;
+  useEffect(function () {
+    if (!ready) return;
+    var busy = false;
+    function quiet() { return syncingRef.current === 0 && Date.now() - lastLocalRef.current > 5000; }
+    async function fullReload() {
+      var loaded = await loadAllFromSupabase();
+      if (!quiet()) return;
+      applyServerTimers(loaded._timers, false);
+      delete loaded._timers;
+      setData(loaded);
+    }
+    async function poll(force) {
+      if (busy || document.hidden || !quiet()) return;
+      busy = true;
+      try {
+        if (force) { await fullReload(); return; }
+        var r = await sb.from("app_state").select("*").eq("id", 1).maybeSingle();
+        var st = r && r.data;
+        if (!st || !quiet()) return;
+        // ポイントが変わっていたら Watch で家事が完了された → 記録ごと読み直す
+        if ((st.total_points || 0) !== (dataRef.current.points || 0)) { await fullReload(); return; }
+        applyServerTimers({ running: st.running_timers || {}, paused: st.paused_timers || {}, startedAt: st.started_timers || {} }, false);
+      } catch (e) { console.error("poll error:", e); }
+      finally { busy = false; }
+    }
+    var iv = setInterval(function () { poll(false); }, 10000);
+    function onVis() { if (!document.hidden) poll(true); }
+    document.addEventListener("visibilitychange", onVis);
+    return function () { clearInterval(iv); document.removeEventListener("visibilitychange", onVis); };
+  }, [ready]);
 
   var doMigrate = async function () {
     try {
@@ -303,14 +389,12 @@ export default function App() {
   function isRunning(taskId) { return !!running[taskId]; }
   function isPaused(taskId) { return !running[taskId] && (paused[taskId] || 0) > 0; }
   function startTask(taskId) {
-    var r = Object.assign({}, running);
-    r[taskId] = Date.now();
-    setRunning(r);
-    if (!startedAt[taskId] && !(paused[taskId] > 0)) {
-      var st = Object.assign({}, startedAt);
-      st[taskId] = Date.now();
-      setStartedAt(st);
-    }
+    var nowT = Date.now();
+    applyTimers(function (c) {
+      if (c.running[taskId]) return;
+      if (!c.startedAt[taskId] && !(c.paused[taskId] > 0)) c.startedAt[taskId] = nowT;
+      c.running[taskId] = nowT;
+    });
   }
   // 開始時刻（ms）。この更新より前に始めたタイマーは経過時間から逆算
   function getStartMs(taskId) {
@@ -320,25 +404,36 @@ export default function App() {
     return Date.now() - p * 1000;
   }
   function getStartDate(taskId) { return ymdOf(getStartMs(taskId)); }
-  function clearStarted(taskId) {
-    if (!startedAt[taskId]) return;
-    var st = Object.assign({}, startedAt);
-    delete st[taskId];
-    setStartedAt(st);
+  function clearTimer(taskId) {
+    applyTimers(function (c) { delete c.running[taskId]; delete c.paused[taskId]; delete c.startedAt[taskId]; });
   }
   function pauseTask(taskId) {
-    var r = Object.assign({}, running);
-    var p = Object.assign({}, paused);
-    if (r[taskId]) {
-      var elapsed = Math.floor((Date.now() - r[taskId]) / 1000);
-      p[taskId] = (p[taskId] || 0) + elapsed;
-      delete r[taskId];
-    }
-    setRunning(r);
-    setPaused(p);
+    var nowT = Date.now();
+    applyTimers(function (c) {
+      if (c.running[taskId]) {
+        var elapsed = Math.floor((nowT - c.running[taskId]) / 1000);
+        c.paused[taskId] = (c.paused[taskId] || 0) + elapsed;
+        delete c.running[taskId];
+      }
+    });
   }
   function resumeTask(taskId) { startTask(taskId); }
-  function finishTask(taskId) {
+  // 完了前にサーバーを確認（Watchですでに完了していたら二重記録しない）
+  async function finishTask(taskId) {
+    try {
+      var chk = await sb.from("app_state").select("running_timers,paused_timers,started_timers").eq("id", 1).maybeSingle();
+      var cs = chk && chk.data;
+      if (cs && !(cs.running_timers || {})[taskId] && !((cs.paused_timers || {})[taskId] > 0)) {
+        var loaded = await loadAllFromSupabase();
+        applyServerTimers(loaded._timers, false);
+        delete loaded._timers;
+        setData(loaded);
+        return;
+      }
+    } catch (e) { console.error("finish check error:", e); }
+    finishTaskNow(taskId);
+  }
+  function finishTaskNow(taskId) {
     var totalSec = getElapsed(taskId);
     var task = data.tasks[taskId];
     if (!task) return;
@@ -367,22 +462,10 @@ export default function App() {
     if (!d.lastLogDate || logDate > d.lastLogDate) d.lastLogDate = logDate;
     d.streak = recalcStreak(d.logs);
     save(d);
-    var r = Object.assign({}, running);
-    var p = Object.assign({}, paused);
-    delete r[taskId];
-    delete p[taskId];
-    setRunning(r);
-    setPaused(p);
-    clearStarted(taskId);
+    clearTimer(taskId);
   }
   function cancelTimer(taskId) {
-    var r = Object.assign({}, running);
-    var p = Object.assign({}, paused);
-    delete r[taskId];
-    delete p[taskId];
-    setRunning(r);
-    setPaused(p);
-    clearStarted(taskId);
+    clearTimer(taskId);
   }
 
   // Categories
