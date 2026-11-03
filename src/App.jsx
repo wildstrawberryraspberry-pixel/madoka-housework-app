@@ -42,7 +42,7 @@ function ymdOf(ms) {
 }
 
 function emptyData() {
-  return { tasks: {}, taskOrder: [], logs: [], streak: 0, lastLogDate: "", categories: DEF_CATEGORIES.map(function (c) { return Object.assign({}, c); }), points: 0, pointHistory: [], rewards: DEF_REWARDS.map(function (r) { return Object.assign({}, r); }) };
+  return { rooms: [], tasks: {}, taskOrder: [], logs: [], streak: 0, lastLogDate: "", categories: DEF_CATEGORIES.map(function (c) { return Object.assign({}, c); }), points: 0, pointHistory: [], rewards: DEF_REWARDS.map(function (r) { return Object.assign({}, r); }) };
 }
 function clone(d) { return JSON.parse(JSON.stringify(d)); }
 function fmtSec(s) {
@@ -90,8 +90,10 @@ async function loadAllFromSupabase() {
     sb.from("rewards").select("*"),
     sb.from("point_history").select("*"),
     sb.from("app_state").select("*").eq("id", 1).maybeSingle(),
+    sb.from("rooms").select("*").order("sort_order"),
   ]);
-  var cRes = results[0], tRes = results[1], rRes = results[2], rwRes = results[3], phRes = results[4], asRes = results[5];
+  var cRes = results[0], tRes = results[1], rRes = results[2], rwRes = results[3], phRes = results[4], asRes = results[5], roRes = results[6];
+  var rooms = ((roRes && roRes.data) || []).map(function (r) { return { id: r.id, name: r.name, emoji: r.emoji || "🚪", is_deleted: !!r.is_deleted }; });
 
   var cats = (cRes.data || []).filter(function (c) { return !c.is_deleted; }).sort(function (a, b) { return (a.sort_order || 0) - (b.sort_order || 0); });
   if (cats.length === 0) cats = DEF_CATEGORIES.map(function (c) { return Object.assign({}, c); });
@@ -99,7 +101,7 @@ async function loadAllFromSupabase() {
   var tasks = {};
   var taskOrder = [];
   (tRes.data || []).filter(function (t) { return !t.is_deleted; }).forEach(function (t) {
-    tasks[t.id] = { id: t.id, name: t.name, category: t.category_id, points: t.points };
+    tasks[t.id] = { id: t.id, name: t.name, category: t.category_id, points: t.points, room: t.room_id || null, interval: t.interval_days == null ? null : t.interval_days, storage: !!t.is_storage };
     taskOrder.push(t.id);
   });
 
@@ -126,6 +128,7 @@ async function loadAllFromSupabase() {
     points: state.total_points || 0,
     pointHistory: pointHistory,
     rewards: rewards,
+    rooms: rooms,
     _timers: {
       running: state.running_timers || {},
       paused: state.paused_timers || {},
@@ -168,9 +171,19 @@ async function syncAllToSupabase(d) {
         points: t.points || 1,
         sort_order: orderMap[t.id] !== undefined ? orderMap[t.id] : 9999,
         is_deleted: !!t.is_deleted,
+        room_id: t.room || null,
+        interval_days: t.interval == null ? null : t.interval,
+        is_storage: !!t.storage,
       };
     });
     await sb.from("tasks").upsert(tasksData);
+  }
+  // rooms（部屋）
+  if (d.rooms && d.rooms.length > 0) {
+    var roomsData = d.rooms.map(function (r, i) {
+      return { id: r.id, name: r.name, emoji: r.emoji || null, sort_order: i, is_deleted: !!r.is_deleted };
+    });
+    await sb.from("rooms").upsert(roomsData);
   }
   // records
   if (d.logs && d.logs.length > 0) {
@@ -496,6 +509,11 @@ export default function App() {
 
   var runningCount = Object.keys(running).length;
 
+  // 掃除・片付け系カテゴリー（🧹そうじタブで部屋ごとに管理する）
+  var cleanCatIds = cleanCategoryIds(cats);
+  var timer = { start: startTask, pause: pauseTask, resume: resumeTask, finish: finishTask, cancel: cancelTimer, isRunning: isRunning, isPaused: isPaused, getElapsed: getElapsed };
+  var homeSuggest = ready ? suggestCleaning(data, cleanCatIds, 9999, null).slice(0, 3) : [];
+
   if (!ready) {
     return (
       <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", height: "100vh", background: "#FAFAF7" }}>
@@ -608,9 +626,28 @@ export default function App() {
             )}
             <div style={S.card}>
               <div style={S.cardTitle}>▶ 家事をはじめる</div>
+              <div style={{ marginBottom: 12, padding: 10, borderRadius: 12, background: "#E0F2F1" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: homeSuggest.length ? 6 : 0 }}>
+                  <div style={{ fontSize: 12, fontWeight: 800, color: "#00897B" }}>🧹 掃除・片付け{homeSuggest.length ? "（そろそろやりどき）" : ""}</div>
+                  <button onClick={function () { setTab("clean"); }} style={{ ...S.smBtn, fontSize: 11, background: "#00897B", color: "#fff" }}>部屋ごとに見る ›</button>
+                </div>
+                {homeSuggest.length > 0 && (
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                    {homeSuggest.map(function (it) {
+                      var isR = isRunning(it.task.id), isP = isPaused(it.task.id);
+                      return (
+                        <button key={it.task.id} onClick={function () { if (isR) pauseTask(it.task.id); else if (isP) resumeTask(it.task.id); else startTask(it.task.id); }} style={{ padding: "6px 10px", borderRadius: 10, border: "none", fontSize: 12, fontWeight: 600, cursor: "pointer", background: isR ? "#4DB6AC" : isP ? "#FFF3E0" : "#fff", color: isR ? "#fff" : isP ? "#FF9800" : "#555" }}>
+                          {isR ? "⏸ " : isP ? "▶ " : ""}{it.task.name}<span style={{ fontSize: 10, opacity: .7 }}> 約{it.min}分</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
               {cats.map(function (cat) {
                 var tasks = tasksByCategory[cat.id] || [];
                 if (tasks.length === 0) return null;
+                if (cleanCatIds.indexOf(cat.id) !== -1) return null;
                 return (
                   <div key={cat.id} style={{ marginBottom: 12 }}>
                     <div style={{ fontSize: 12, fontWeight: 700, color: cat.color, marginBottom: 6 }}>{cat.emoji} {cat.name}</div>
@@ -685,6 +722,14 @@ export default function App() {
             <h2 style={{ fontSize: 17, fontWeight: 800, marginBottom: 12 }}>📋 タスク管理</h2>
             {cats.map(function (cat) {
               var tasks = tasksByCategory[cat.id] || [];
+              if (cleanCatIds.indexOf(cat.id) !== -1) {
+                return (
+                  <div key={cat.id} style={{ ...S.card, display: "flex", alignItems: "center", gap: 8 }}>
+                    <div style={{ ...S.cardTitle, marginBottom: 0, flex: 1 }}>{cat.emoji} {cat.name}<span style={{ fontSize: 11, color: "#aaa", fontWeight: 400 }}>（{tasks.length}件）</span></div>
+                    <button onClick={function () { setTab("clean"); }} style={{ ...S.smBtn, fontSize: 11, background: "#E0F2F1", color: "#00897B" }}>🧹 部屋ごとに編集 ›</button>
+                  </div>
+                );
+              }
               return (
                 <div key={cat.id} style={S.card}>
                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
@@ -729,12 +774,14 @@ export default function App() {
             <AddCategoryForm data={data} save={save} cats={cats} />
           </div>
         )}
+        {tab === "clean" && <CleanTab data={data} save={save} cats={cats} cleanCatIds={cleanCatIds} timer={timer} nowMs={nowMs} />}
         {tab === "rewards" && <RewardsTab data={data} save={save} />}
         {tab === "stats" && <StatsTab data={data} cats={cats} save={save} />}
       </main>
       <nav style={S.nav}>
         {[
           { id: "home", icon: "🏠", l: "ホーム" },
+          { id: "clean", icon: "🧹", l: "そうじ" },
           { id: "tasks", icon: "📋", l: "タスク管理" },
           { id: "rewards", icon: "🎁", l: "ごほうび" },
           { id: "stats", icon: "📊", l: "統計" },
@@ -747,6 +794,493 @@ export default function App() {
           );
         })}
       </nav>
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════
+// 🧹 そうじ（部屋ごと管理・放置度・◯分ある提案）
+// ═══════════════════════════════════════════════
+var INTERVALS = [
+  { v: 1, l: "毎日" }, { v: 3, l: "3日に1回" }, { v: 7, l: "週1" }, { v: 14, l: "2週に1回" },
+  { v: 30, l: "月1" }, { v: 60, l: "2か月に1回" }, { v: 90, l: "3か月に1回" }, { v: 180, l: "半年に1回" },
+  { v: 365, l: "年1" }, { v: null, l: "決めない（提案しない）" },
+];
+var DEFAULT_MIN = 15; // 記録がないときの仮の所要時間（分）
+function intervalLabel(v) {
+  if (v == null) return "目安なし";
+  var f = INTERVALS.find(function (x) { return x.v === v; });
+  return f ? f.l : v + "日に1回";
+}
+// 掃除・片付け系カテゴリー：id が cleaning、または名前に「掃除／片付／整理」を含む
+function cleanCategoryIds(cats) {
+  return (cats || []).filter(function (c) { return !c.is_deleted && (c.id === "cleaning" || /掃除|片付|整理/.test(c.name || "")); }).map(function (c) { return c.id; });
+}
+function median(arr) {
+  if (!arr.length) return 0;
+  var s = arr.slice().sort(function (a, b) { return a - b; });
+  var m = Math.floor(s.length / 2);
+  return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
+}
+// タスクごとの 最終実施日・回数・所要時間（直近10回の中央値。30秒未満と、中央値の3倍超＝止め忘れは除外）
+function taskStatsMap(logs) {
+  var by = {};
+  (logs || []).forEach(function (l) {
+    if (!l.taskId) return;
+    var b = by[l.taskId] || (by[l.taskId] = { last: "", count: 0, recs: [] });
+    b.count++;
+    if (l.date > b.last) b.last = l.date;
+    b.recs.push(l);
+  });
+  Object.keys(by).forEach(function (id) {
+    var b = by[id];
+    var secs = b.recs.slice().sort(function (a, c) { return a.date < c.date ? 1 : -1; }).slice(0, 10)
+      .map(function (r) { return r.seconds || 0; }).filter(function (s) { return s >= 30; });
+    var m = median(secs);
+    var ok = secs.filter(function (s) { return secs.length < 3 || s <= m * 3; });
+    b.medSec = ok.length ? median(ok) : 0;
+    delete b.recs;
+  });
+  return by;
+}
+// 掃除系タスク1件ずつの状態
+function cleanItems(data, cleanCatIds) {
+  var st = taskStatsMap(data.logs);
+  var roomIds = {};
+  (data.rooms || []).forEach(function (r) { if (!r.is_deleted) roomIds[r.id] = true; });
+  return Object.values(data.tasks || {}).filter(function (t) { return !t.is_deleted && cleanCatIds.indexOf(t.category) !== -1; }).map(function (t) {
+    var s = st[t.id] || { last: "", count: 0, medSec: 0 };
+    var daysAgo = s.last ? Math.max(0, daysBetween(s.last, TD)) : null;
+    var ratio = null;
+    if (t.interval) ratio = daysAgo == null ? 1 : daysAgo / t.interval; // 記録なし（追加したばかり等）は「やりどき」扱い
+    var min = s.medSec ? Math.max(1, Math.round(s.medSec / 60)) : DEFAULT_MIN;
+    return { task: t, room: t.room && roomIds[t.room] ? t.room : null, last: s.last, count: s.count, daysAgo: daysAgo, ratio: ratio, min: min, measured: !!s.medSec };
+  });
+}
+function levelOf(ratio) {
+  if (ratio == null) return { c: "#BDBDBD", bg: "#F5F5F5", l: "目安なし", n: 0 };
+  if (ratio >= 2) return { c: "#E53935", bg: "#FFEBEE", l: "放置ぎみ", n: 3 };
+  if (ratio >= 1) return { c: "#FB8C00", bg: "#FFF3E0", l: "やりどき", n: 2 };
+  if (ratio >= 0.8) return { c: "#FDD835", bg: "#FFFDE7", l: "そろそろ", n: 1 };
+  return { c: "#66BB6A", bg: "#E8F5E9", l: "きれい", n: 0 };
+}
+// ◯分でできる組み合わせを提案：放置度の高い順に、時間内に収まるものを詰める
+function suggestCleaning(data, cleanCatIds, budgetMin, roomId) {
+  var items = cleanItems(data, cleanCatIds).filter(function (it) {
+    return it.ratio != null && it.ratio >= 0.8 && it.min <= budgetMin && (!roomId || it.room === roomId);
+  });
+  items.sort(function (a, b) { return b.ratio - a.ratio || a.min - b.min; });
+  var out = [], used = 0;
+  items.forEach(function (it) {
+    if (used + it.min <= budgetMin) { out.push(it); used += it.min; }
+  });
+  return out;
+}
+function mdOf(ymd) { return ymd ? Number(ymd.slice(5, 7)) + "/" + Number(ymd.slice(8, 10)) : ""; }
+function agoLabel(it) {
+  if (!it.last) return "記録なし";
+  if (it.daysAgo === 0) return "今日";
+  return mdOf(it.last) + "（" + it.daysAgo + "日前）";
+}
+
+function CleanTab(p) {
+  var data = p.data, save = p.save, cats = p.cats, cleanCatIds = p.cleanCatIds, timer = p.timer;
+  var _v = useState("rooms"), view = _v[0], setView = _v[1];
+  var _b = useState(null), budget = _b[0], setBudget = _b[1];
+  var _bc = useState(""), budgetCustom = _bc[0], setBudgetCustom = _bc[1];
+  var _rf = useState(""), roomFilter = _rf[0], setRoomFilter = _rf[1];
+  var _ar = useState(false), addingRoom = _ar[0], setAddingRoom = _ar[1];
+  var _sort = useState(false), sorting = _sort[0], setSorting = _sort[1];
+
+  var rooms = (data.rooms || []).filter(function (r) { return !r.is_deleted; });
+  var items = cleanItems(data, cleanCatIds);
+  var itemsOf = function (rid) {
+    return items.filter(function (it) { return it.room === rid; }).sort(function (a, b) {
+      var ra = a.ratio == null ? -1 : a.ratio, rb = b.ratio == null ? -1 : b.ratio;
+      return rb - ra;
+    });
+  };
+  var unassigned = itemsOf(null);
+  var activeIds = items.filter(function (it) { return timer.isRunning(it.task.id) || timer.isPaused(it.task.id); });
+  var sug = budget ? suggestCleaning(data, cleanCatIds, budget, roomFilter || null) : [];
+  var sugTotal = sug.reduce(function (s, it) { return s + it.min; }, 0);
+  var roomOf = function (rid) { return rooms.find(function (r) { return r.id === rid; }); };
+
+  function moveRoom(rid, dir) {
+    var d = clone(data);
+    var list = d.rooms || [];
+    var vis = list.filter(function (r) { return !r.is_deleted; }).map(function (r) { return r.id; });
+    var i = vis.indexOf(rid), j = i + dir;
+    if (i < 0 || j < 0 || j >= vis.length) return;
+    var gi = list.findIndex(function (r) { return r.id === vis[i]; });
+    var gj = list.findIndex(function (r) { return r.id === vis[j]; });
+    var tmp = list[gi]; list[gi] = list[gj]; list[gj] = tmp;
+    save(d);
+  }
+
+  // ── 部屋の詳細 ──
+  if (view !== "rooms" && (view === "__none__" || roomOf(view))) {
+    var isUn = view === "__none__";
+    var room = isUn ? { id: null, name: "部屋が未設定", emoji: "📍" } : roomOf(view);
+    var list = itemsOf(isUn ? null : room.id);
+    return (
+      <div style={{ animation: "fadeIn .3s ease" }}>
+        <button onClick={function () { setView("rooms"); }} style={{ background: "none", border: "none", fontSize: 13, color: "#00897B", fontWeight: 700, cursor: "pointer", padding: "4px 0", marginBottom: 6 }}>‹ 部屋の一覧へ</button>
+        {isUn ? (
+          <h2 style={{ fontSize: 17, fontWeight: 800, marginBottom: 4 }}>📍 部屋が未設定</h2>
+        ) : (
+          <RoomHeader room={room} data={data} save={save} onDeleted={function () { setView("rooms"); }} />
+        )}
+        {isUn && <div style={{ fontSize: 11, color: "#999", marginBottom: 10 }}>それぞれの「✏️」から部屋を選ぶと、その部屋に移ります</div>}
+        {activeIds.length > 0 && <ActiveCard items={activeIds} timer={timer} />}
+        <div style={S.card}>
+          {list.length === 0 && <div style={{ fontSize: 12, color: "#bbb", padding: "4px 0" }}>まだ何もありません。下から追加してください</div>}
+          {list.map(function (it) {
+            return <CleanItemRow key={it.task.id} it={it} data={data} save={save} rooms={rooms} cats={cats} cleanCatIds={cleanCatIds} timer={timer} />;
+          })}
+        </div>
+        {!isUn && <AddCleanItem room={room} data={data} save={save} cats={cats} cleanCatIds={cleanCatIds} />}
+      </div>
+    );
+  }
+
+  // ── 部屋の一覧（トップ）──
+  return (
+    <div style={{ animation: "fadeIn .3s ease" }}>
+      <h2 style={{ fontSize: 17, fontWeight: 800, marginBottom: 12 }}>🧹 そうじ・片付け</h2>
+
+      <div style={{ ...S.card, background: "linear-gradient(135deg, #E0F2F1, #fff)" }}>
+        <div style={S.cardTitle}>⏱ いま何分ある？</div>
+        <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
+          {[10, 15, 30, 60].map(function (m) {
+            var on = budget === m;
+            return <button key={m} onClick={function () { setBudget(on ? null : m); setBudgetCustom(""); }} style={{ ...S.smBtn, background: on ? "#00897B" : "#fff", color: on ? "#fff" : "#00897B", border: "1.5px solid #00897B" }}>{m}分</button>;
+          })}
+          <input type="number" min="1" value={budgetCustom} placeholder="◯分" onChange={function (e) { setBudgetCustom(e.target.value); var n = parseInt(e.target.value); setBudget(n > 0 ? n : null); }} style={{ ...S.input, width: 64, flex: "none", textAlign: "center", padding: "6px 6px" }} />
+        </div>
+        {budget && (
+          <div style={{ marginTop: 10 }}>
+            <select value={roomFilter} onChange={function (e) { setRoomFilter(e.target.value); }} style={{ ...S.input, width: "100%", marginBottom: 8, padding: "6px 8px" }}>
+              <option value="">🏠 家じゅうから選ぶ</option>
+              {rooms.map(function (r) { return <option key={r.id} value={r.id}>{r.emoji} {r.name}だけ</option>; })}
+            </select>
+            {sug.length === 0 ? (
+              <div style={{ fontSize: 12, color: "#888", padding: "6px 0" }}>{budget}分で収まる「やりどき」のものはありません。きれいな状態です✨</div>
+            ) : (
+              <div>
+                <div style={{ fontSize: 12, color: "#00897B", fontWeight: 700, marginBottom: 4 }}>おすすめ {sug.length}件・合計 約{sugTotal}分</div>
+                {sug.map(function (it) {
+                  var r = roomOf(it.room);
+                  return <SuggestRow key={it.task.id} it={it} room={r} timer={timer} />;
+                })}
+              </div>
+            )}
+            <div style={{ fontSize: 10, color: "#aaa", marginTop: 6, lineHeight: 1.5 }}>放置度（前回からの日数÷目安）が高い順に、時間内に収まるものを選んでいます。時間は過去の記録の中央値で、記録がないものは{DEFAULT_MIN}分の仮置きです（「仮」と表示）。</div>
+          </div>
+        )}
+      </div>
+
+      {activeIds.length > 0 && <ActiveCard items={activeIds} timer={timer} />}
+
+      <div style={S.card}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+          <div style={{ ...S.cardTitle, marginBottom: 0 }}>🏠 部屋ごと</div>
+          <button onClick={function () { setSorting(!sorting); }} style={{ ...S.smBtn, fontSize: 11, background: sorting ? "#00897B" : "#eee", color: sorting ? "#fff" : "#888" }}>{sorting ? "完了" : "↕ 並べ替え"}</button>
+        </div>
+        <div style={{ display: "grid", gridTemplateColumns: sorting ? "1fr" : "1fr 1fr", gap: 8 }}>
+          {rooms.map(function (r, idx) {
+            var its = itemsOf(r.id);
+            var red = its.filter(function (it) { return levelOf(it.ratio).n === 3; }).length;
+            var org = its.filter(function (it) { return levelOf(it.ratio).n === 2; }).length;
+            var worst = its.reduce(function (mx, it) { return Math.max(mx, levelOf(it.ratio).n); }, 0);
+            var lv = worst === 3 ? levelOf(2) : worst === 2 ? levelOf(1) : null;
+            var col = worst === 3 ? "#E53935" : worst === 2 ? "#FB8C00" : worst === 1 ? "#FDD835" : "#66BB6A";
+            if (sorting) {
+              return (
+                <div key={r.id} style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 8px", background: "#fafafa", borderRadius: 10 }}>
+                  <span style={{ fontSize: 18 }}>{r.emoji}</span>
+                  <span style={{ flex: 1, fontSize: 13, fontWeight: 700 }}>{r.name}</span>
+                  <button disabled={idx === 0} onClick={function () { moveRoom(r.id, -1); }} style={{ ...S.smBtn, background: "#fff", color: idx === 0 ? "#ddd" : "#888", border: "1px solid #eee" }}>▲</button>
+                  <button disabled={idx === rooms.length - 1} onClick={function () { moveRoom(r.id, 1); }} style={{ ...S.smBtn, background: "#fff", color: idx === rooms.length - 1 ? "#ddd" : "#888", border: "1px solid #eee" }}>▼</button>
+                </div>
+              );
+            }
+            return (
+              <div key={r.id} onClick={function () { setView(r.id); }} style={{ padding: 10, borderRadius: 12, cursor: "pointer", background: "#fff", border: "1.5px solid #eee", borderLeft: "5px solid " + col }}>
+                <div style={{ fontSize: 13, fontWeight: 800 }}>{r.emoji} {r.name}</div>
+                <div style={{ fontSize: 10, color: "#999", marginTop: 3 }}>{its.length}か所{its.filter(function (it) { return it.task.storage; }).length ? "（収納" + its.filter(function (it) { return it.task.storage; }).length + "）" : ""}</div>
+                <div style={{ fontSize: 10, marginTop: 2, fontWeight: 700, color: red ? "#E53935" : org ? "#FB8C00" : "#66BB6A" }}>
+                  {red ? "🔴 放置ぎみ " + red : ""}{red && org ? "・" : ""}{org ? "🟠 やりどき " + org : ""}{!red && !org ? "✨ だいたいOK" : ""}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+        {!sorting && unassigned.length > 0 && (
+          <div onClick={function () { setView("__none__"); }} style={{ marginTop: 8, padding: 10, borderRadius: 12, cursor: "pointer", background: "#FAFAFA", border: "1.5px dashed #ccc" }}>
+            <div style={{ fontSize: 13, fontWeight: 700, color: "#888" }}>📍 部屋が未設定（{unassigned.length}件）</div>
+            <div style={{ fontSize: 10, color: "#aaa", marginTop: 2 }}>タップして部屋を振り分け</div>
+          </div>
+        )}
+        {!sorting && (addingRoom ? (
+          <AddRoomForm data={data} save={save} onDone={function (rid) { setAddingRoom(false); if (rid) setView(rid); }} />
+        ) : (
+          <button onClick={function () { setAddingRoom(true); }} style={{ width: "100%", marginTop: 10, padding: 10, borderRadius: 10, border: "2px dashed #B2DFDB", background: "transparent", fontSize: 13, fontWeight: 700, color: "#00897B", cursor: "pointer" }}>＋ 部屋を追加</button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function SuggestRow(p) {
+  var it = p.it, room = p.room, timer = p.timer;
+  var lv = levelOf(it.ratio);
+  var isR = timer.isRunning(it.task.id), isP = timer.isPaused(it.task.id);
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 0", borderBottom: "1px solid #eef5f4" }}>
+      <span style={{ width: 8, height: 8, borderRadius: 4, background: lv.c, flex: "none" }} />
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={{ fontSize: 13, fontWeight: 700 }}>{it.task.name}</div>
+        <div style={{ fontSize: 10, color: "#999" }}>{room ? room.emoji + " " + room.name + "・" : ""}前回 {agoLabel(it)}・{lv.l}</div>
+      </div>
+      <div style={{ fontSize: 12, fontWeight: 800, color: "#00897B", whiteSpace: "nowrap" }}>約{it.min}分{it.measured ? "" : <span style={{ fontSize: 9, color: "#bbb" }}>仮</span>}</div>
+      <button onClick={function () { if (isR) timer.pause(it.task.id); else if (isP) timer.resume(it.task.id); else timer.start(it.task.id); }} style={{ ...S.smBtn, background: isR ? "#FF9800" : "#00897B", color: "#fff" }}>{isR ? "⏸" : "▶"}</button>
+    </div>
+  );
+}
+
+function ActiveCard(p) {
+  var timer = p.timer;
+  return (
+    <div style={{ ...S.card, border: "1.5px solid #4DB6AC" }}>
+      <div style={S.cardTitle}>⏱️ いま進行中</div>
+      {p.items.map(function (it) {
+        var isR = timer.isRunning(it.task.id);
+        return (
+          <div key={it.task.id} style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 0" }}>
+            <div style={{ flex: 1 }}>
+              <div style={{ fontSize: 13, fontWeight: 700 }}>{it.task.name}</div>
+              <div style={{ fontSize: 18, fontWeight: 900, color: isR ? "#00897B" : "#aaa", fontVariantNumeric: "tabular-nums" }}>{fmtSec(timer.getElapsed(it.task.id))}{isR ? "" : " ⏸"}</div>
+            </div>
+            <button onClick={function () { if (isR) timer.pause(it.task.id); else timer.resume(it.task.id); }} style={{ ...S.smBtn, background: isR ? "#FF9800" : "#4DB6AC", color: "#fff" }}>{isR ? "⏸" : "▶"}</button>
+            <button onClick={function () { timer.finish(it.task.id); }} style={{ ...S.smBtn, background: "#4CAF50", color: "#fff" }}>✓完了</button>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function CleanItemRow(p) {
+  var it = p.it, data = p.data, save = p.save, rooms = p.rooms, cats = p.cats, cleanCatIds = p.cleanCatIds, timer = p.timer;
+  var t = it.task;
+  var _e = useState(false), editing = _e[0], setEditing = _e[1];
+  var _n = useState(t.name), name = _n[0], setName = _n[1];
+  var _r = useState(t.room || ""), room = _r[0], setRoom = _r[1];
+  var _i = useState(t.interval == null ? "" : String(t.interval)), iv = _i[0], setIv = _i[1];
+  var _k = useState(t.storage ? "storage" : (t.category === "cleaning" ? "clean" : "tidy")), kind = _k[0], setKind = _k[1];
+  var lv = levelOf(it.ratio);
+  var isR = timer.isRunning(t.id), isP = timer.isPaused(t.id);
+  function saveEdit() {
+    if (!name.trim()) return;
+    var d = clone(data);
+    var x = d.tasks[t.id]; if (!x) return;
+    x.name = name.trim();
+    x.room = room || null;
+    x.interval = iv === "" ? null : parseInt(iv);
+    x.storage = kind === "storage";
+    x.category = catForKind(kind, cats, cleanCatIds, x.category);
+    save(d);
+    setEditing(false);
+  }
+  // タイマーなしで「やった」を記録（家族がやった・記録し忘れた分）。時間0秒なので所要時間の計算には使わない
+  function markDone() {
+    var d = clone(data);
+    var ptAmt = t.points || 1;
+    d.logs.push({ id: "log" + Date.now(), taskId: t.id, taskName: t.name, category: t.category, date: TD, seconds: 0, time: "記録のみ", points: ptAmt });
+    d.points = (d.points || 0) + ptAmt;
+    if (!d.pointHistory) d.pointHistory = [];
+    d.pointHistory.push({ type: "earn", amount: ptAmt, reason: t.name, date: TD, id: "pe" + Date.now() });
+    if (!d.lastLogDate || TD > d.lastLogDate) d.lastLogDate = TD;
+    d.streak = recalcStreak(d.logs);
+    save(d);
+    setEditing(false);
+  }
+  function del() {
+    if (!window.confirm("「" + t.name + "」を削除しますか？（これまでの記録は残ります）")) return;
+    var d = clone(data);
+    if (d.tasks[t.id]) d.tasks[t.id].is_deleted = true;
+    if (d.taskOrder) d.taskOrder = d.taskOrder.filter(function (id) { return id !== t.id; });
+    save(d);
+  }
+  return (
+    <div style={{ padding: "9px 0", borderBottom: "1px solid #f3f3f3" }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <span title={lv.l} style={{ width: 10, height: 10, borderRadius: 5, background: lv.c, flex: "none" }} />
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ fontSize: 13, fontWeight: 700 }}>
+            {t.name}
+            {t.storage && <span style={{ fontSize: 9, marginLeft: 4, padding: "1px 5px", borderRadius: 6, background: "#EDE7F6", color: "#7E57C2" }}>収納</span>}
+          </div>
+          <div style={{ fontSize: 10, color: "#999", marginTop: 1 }}>
+            前回 {agoLabel(it)}・約{it.min}分{it.measured ? "" : "(仮)"}・{intervalLabel(t.interval)}
+            {it.ratio != null && <span style={{ color: lv.c === "#FDD835" ? "#C0A000" : lv.c, fontWeight: 700 }}>・{lv.l}</span>}
+          </div>
+        </div>
+        <button onClick={function () { setEditing(!editing); setName(t.name); setRoom(t.room || ""); setIv(t.interval == null ? "" : String(t.interval)); }} style={{ background: "none", border: "none", fontSize: 13, cursor: "pointer", color: "#bbb" }}>✏️</button>
+        <button onClick={function () { if (isR) timer.pause(t.id); else if (isP) timer.resume(t.id); else timer.start(t.id); }} style={{ ...S.smBtn, background: isR ? "#FF9800" : isP ? "#FFF3E0" : "#E0F2F1", color: isR ? "#fff" : isP ? "#FF9800" : "#00897B" }}>{isR ? "⏸" : "▶"}</button>
+      </div>
+      {editing && (
+        <div style={{ marginTop: 8, padding: 10, background: "#F7FBFA", borderRadius: 10 }}>
+          <input value={name} onChange={function (e) { setName(e.target.value); }} style={{ ...S.input, width: "100%", marginBottom: 6 }} />
+          <div style={{ display: "flex", gap: 6, marginBottom: 6 }}>
+            <select value={room} onChange={function (e) { setRoom(e.target.value); }} style={{ ...S.input, padding: "6px 6px" }}>
+              <option value="">📍 部屋なし</option>
+              {rooms.map(function (r) { return <option key={r.id} value={r.id}>{r.emoji} {r.name}</option>; })}
+            </select>
+            <select value={iv} onChange={function (e) { setIv(e.target.value); }} style={{ ...S.input, padding: "6px 6px" }}>
+              {INTERVALS.map(function (x) { return <option key={String(x.v)} value={x.v == null ? "" : String(x.v)}>{x.l}</option>; })}
+            </select>
+          </div>
+          <KindPicker kind={kind} setKind={setKind} />
+          <button onClick={markDone} style={{ ...S.smBtn, width: "100%", marginTop: 8, background: "#fff", color: "#43A047", border: "1px solid #C8E6C9" }}>✓ 今日やった（タイマーなしで記録だけ）</button>
+          <div style={{ display: "flex", gap: 6, marginTop: 8 }}>
+            <button onClick={saveEdit} style={{ ...S.smBtn, background: "#00897B", color: "#fff", flex: 1 }}>保存</button>
+            <button onClick={function () { setEditing(false); }} style={{ ...S.smBtn, background: "#eee", color: "#888" }}>やめる</button>
+            <button onClick={del} style={{ ...S.smBtn, background: "#fff", color: "#E53935", border: "1px solid #FFCDD2" }}>🗑</button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function KindPicker(p) {
+  return (
+    <div style={{ display: "flex", gap: 4 }}>
+      {[{ k: "clean", l: "🧹 掃除" }, { k: "tidy", l: "🍀 片付け" }, { k: "storage", l: "🗄 収納の整理" }].map(function (x) {
+        var on = p.kind === x.k;
+        return <button key={x.k} onClick={function () { p.setKind(x.k); }} style={{ ...S.smBtn, flex: 1, fontSize: 11, background: on ? "#00897B" : "#fff", color: on ? "#fff" : "#666", border: "1px solid " + (on ? "#00897B" : "#e0e0e0") }}>{x.l}</button>;
+      })}
+    </div>
+  );
+}
+// 種類 → 記録上のカテゴリー（掃除＝掃除カテゴリー、片付け・収納＝片付けカテゴリー）
+function catForKind(kind, cats, cleanCatIds, fallback) {
+  var cleanCat = cleanCatIds.indexOf("cleaning") !== -1 ? "cleaning" : cleanCatIds[0];
+  var tidy = cats.find(function (c) { return cleanCatIds.indexOf(c.id) !== -1 && /片付|整理/.test(c.name || ""); });
+  if (kind === "clean") return cleanCat || fallback;
+  return (tidy && tidy.id) || cleanCat || fallback;
+}
+
+function AddCleanItem(p) {
+  var room = p.room, data = p.data, save = p.save, cats = p.cats, cleanCatIds = p.cleanCatIds;
+  var _o = useState(false), open = _o[0], setOpen = _o[1];
+  var _n = useState(""), name = _n[0], setName = _n[1];
+  var _k = useState("clean"), kind = _k[0], setKind = _k[1];
+  var _i = useState("7"), iv = _i[0], setIv = _i[1];
+  function pickKind(k) { setKind(k); setIv(k === "clean" ? "7" : k === "tidy" ? "30" : "180"); }
+  function add() {
+    if (!name.trim()) return;
+    var d = clone(data);
+    var id = "task" + Date.now();
+    d.tasks[id] = { id: id, name: name.trim(), category: catForKind(kind, cats, cleanCatIds, "cleaning"), points: 1, room: room.id, interval: iv === "" ? null : parseInt(iv), storage: kind === "storage" };
+    if (!d.taskOrder) d.taskOrder = [];
+    d.taskOrder.push(id);
+    save(d);
+    setName("");
+  }
+  if (!open) {
+    return (
+      <div style={{ display: "flex", gap: 6 }}>
+        <button onClick={function () { pickKind("clean"); setOpen(true); }} style={{ flex: 1, padding: 10, borderRadius: 10, border: "2px dashed #B2DFDB", background: "transparent", fontSize: 12, fontWeight: 700, color: "#00897B", cursor: "pointer" }}>＋ 掃除・片付けを追加</button>
+        <button onClick={function () { pickKind("storage"); setOpen(true); }} style={{ flex: 1, padding: 10, borderRadius: 10, border: "2px dashed #D1C4E9", background: "transparent", fontSize: 12, fontWeight: 700, color: "#7E57C2", cursor: "pointer" }}>＋ 収納を追加</button>
+      </div>
+    );
+  }
+  return (
+    <div style={S.card}>
+      <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 8 }}>{room.emoji} {room.name} に追加</div>
+      <KindPicker kind={kind} setKind={pickKind} />
+      <input value={name} onChange={function (e) { setName(e.target.value); }} onKeyDown={function (e) { if (e.key === "Enter") add(); }} placeholder={kind === "storage" ? "例：テレビ台の引き出し、押し入れ上段" : kind === "tidy" ? "例：棚の上を片付ける" : "例：窓ふき、照明のほこり取り"} style={{ ...S.input, width: "100%", marginTop: 8 }} />
+      <div style={{ display: "flex", gap: 6, alignItems: "center", marginTop: 6 }}>
+        <span style={{ fontSize: 11, color: "#888", whiteSpace: "nowrap" }}>目安</span>
+        <select value={iv} onChange={function (e) { setIv(e.target.value); }} style={{ ...S.input, padding: "6px 6px" }}>
+          {INTERVALS.map(function (x) { return <option key={String(x.v)} value={x.v == null ? "" : String(x.v)}>{x.l}</option>; })}
+        </select>
+      </div>
+      <div style={{ display: "flex", gap: 6, marginTop: 8 }}>
+        <button onClick={add} style={{ ...S.smBtn, background: "#00897B", color: "#fff", flex: 1 }}>追加（続けて入力できます）</button>
+        <button onClick={function () { setOpen(false); setName(""); }} style={{ ...S.smBtn, background: "#eee", color: "#888" }}>閉じる</button>
+      </div>
+    </div>
+  );
+}
+
+function AddRoomForm(p) {
+  var data = p.data, save = p.save;
+  var _n = useState(""), name = _n[0], setName = _n[1];
+  var _e = useState("🚪"), emoji = _e[0], setEmoji = _e[1];
+  function add() {
+    if (!name.trim()) return;
+    var d = clone(data);
+    if (!d.rooms) d.rooms = [];
+    var id = "room" + Date.now();
+    d.rooms.push({ id: id, name: name.trim(), emoji: emoji || "🚪" });
+    save(d);
+    p.onDone(id);
+  }
+  return (
+    <div style={{ marginTop: 10, padding: 10, background: "#F7FBFA", borderRadius: 10 }}>
+      <div style={{ display: "flex", gap: 6 }}>
+        <input value={emoji} onChange={function (e) { setEmoji(e.target.value); }} style={{ ...S.input, width: 44, flex: "none", textAlign: "center" }} />
+        <input value={name} onChange={function (e) { setName(e.target.value); }} onKeyDown={function (e) { if (e.key === "Enter") add(); }} placeholder="部屋の名前（例：子ども部屋、納戸）" style={S.input} autoFocus />
+      </div>
+      <div style={{ display: "flex", gap: 6, marginTop: 8 }}>
+        <button onClick={add} style={{ ...S.smBtn, background: "#00897B", color: "#fff", flex: 1 }}>追加</button>
+        <button onClick={function () { p.onDone(null); }} style={{ ...S.smBtn, background: "#eee", color: "#888" }}>やめる</button>
+      </div>
+    </div>
+  );
+}
+
+function RoomHeader(p) {
+  var room = p.room, data = p.data, save = p.save;
+  var _e = useState(false), editing = _e[0], setEditing = _e[1];
+  var _n = useState(room.name), name = _n[0], setName = _n[1];
+  var _m = useState(room.emoji), emoji = _m[0], setEmoji = _m[1];
+  function saveRoom() {
+    if (!name.trim()) return;
+    var d = clone(data);
+    d.rooms = (d.rooms || []).map(function (r) { return r.id === room.id ? Object.assign({}, r, { name: name.trim(), emoji: emoji || "🚪" }) : r; });
+    save(d); setEditing(false);
+  }
+  function delRoom() {
+    if (!window.confirm("「" + room.name + "」を削除しますか？\n中の掃除・収納は消えずに「部屋が未設定」に移ります")) return;
+    var d = clone(data);
+    d.rooms = (d.rooms || []).map(function (r) { return r.id === room.id ? Object.assign({}, r, { is_deleted: true }) : r; });
+    Object.values(d.tasks).forEach(function (t) { if (t.room === room.id) t.room = null; });
+    save(d); p.onDeleted();
+  }
+  if (editing) {
+    return (
+      <div style={{ ...S.card, marginBottom: 10 }}>
+        <div style={{ display: "flex", gap: 6 }}>
+          <input value={emoji} onChange={function (e) { setEmoji(e.target.value); }} style={{ ...S.input, width: 44, flex: "none", textAlign: "center" }} />
+          <input value={name} onChange={function (e) { setName(e.target.value); }} style={S.input} />
+        </div>
+        <div style={{ display: "flex", gap: 6, marginTop: 8 }}>
+          <button onClick={saveRoom} style={{ ...S.smBtn, background: "#00897B", color: "#fff", flex: 1 }}>保存</button>
+          <button onClick={function () { setEditing(false); }} style={{ ...S.smBtn, background: "#eee", color: "#888" }}>やめる</button>
+          <button onClick={delRoom} style={{ ...S.smBtn, background: "#fff", color: "#E53935", border: "1px solid #FFCDD2" }}>🗑 部屋を削除</button>
+        </div>
+      </div>
+    );
+  }
+  return (
+    <div style={{ display: "flex", alignItems: "center", marginBottom: 10 }}>
+      <h2 style={{ fontSize: 18, fontWeight: 800, flex: 1 }}>{room.emoji} {room.name}</h2>
+      <button onClick={function () { setEditing(true); setName(room.name); setEmoji(room.emoji); }} style={{ ...S.smBtn, fontSize: 11, background: "#eee", color: "#888" }}>✏️ 部屋を編集</button>
     </div>
   );
 }
