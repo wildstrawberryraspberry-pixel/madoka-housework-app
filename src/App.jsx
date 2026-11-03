@@ -807,6 +807,7 @@ var INTERVALS = [
   { v: 365, l: "年1" }, { v: null, l: "決めない（提案しない）" },
 ];
 var DEFAULT_MIN = 15; // 記録がないときの仮の所要時間（分）
+var DEFAULT_PTS = { clean: 20, tidy: 20, storage: 50 }; // 追加するときのポイント初期値（種類別）
 function intervalLabel(v) {
   if (v == null) return "目安なし";
   var f = INTERVALS.find(function (x) { return x.v === v; });
@@ -1079,6 +1080,7 @@ function CleanItemRow(p) {
   var _r = useState(t.room || ""), room = _r[0], setRoom = _r[1];
   var _i = useState(t.interval == null ? "" : String(t.interval)), iv = _i[0], setIv = _i[1];
   var _k = useState(t.storage ? "storage" : (t.category === "cleaning" ? "clean" : "tidy")), kind = _k[0], setKind = _k[1];
+  var _pt = useState(String(t.points || 1)), pts = _pt[0], setPts = _pt[1];
   var lv = levelOf(it.ratio);
   var isR = timer.isRunning(t.id), isP = timer.isPaused(t.id);
   function saveEdit() {
@@ -1089,6 +1091,7 @@ function CleanItemRow(p) {
     x.room = room || null;
     x.interval = iv === "" ? null : parseInt(iv);
     x.storage = kind === "storage";
+    x.points = Math.max(1, parseInt(pts) || 1);
     x.category = catForKind(kind, cats, cleanCatIds, x.category);
     save(d);
     setEditing(false);
@@ -1127,7 +1130,7 @@ function CleanItemRow(p) {
             {it.ratio != null && <span style={{ color: lv.c === "#FDD835" ? "#C0A000" : lv.c, fontWeight: 700 }}>・{lv.l}</span>}
           </div>
         </div>
-        <button onClick={function () { setEditing(!editing); setName(t.name); setRoom(t.room || ""); setIv(t.interval == null ? "" : String(t.interval)); }} style={{ background: "none", border: "none", fontSize: 13, cursor: "pointer", color: "#bbb" }}>✏️</button>
+        <button onClick={function () { setEditing(!editing); setName(t.name); setRoom(t.room || ""); setIv(t.interval == null ? "" : String(t.interval)); setPts(String(t.points || 1)); }} style={{ background: "none", border: "none", fontSize: 13, cursor: "pointer", color: "#bbb" }}>✏️</button>
         <button onClick={function () { if (isR) timer.pause(t.id); else if (isP) timer.resume(t.id); else timer.start(t.id); }} style={{ ...S.smBtn, background: isR ? "#FF9800" : isP ? "#FFF3E0" : "#E0F2F1", color: isR ? "#fff" : isP ? "#FF9800" : "#00897B" }}>{isR ? "⏸" : "▶"}</button>
       </div>
       {editing && (
@@ -1141,6 +1144,11 @@ function CleanItemRow(p) {
             <select value={iv} onChange={function (e) { setIv(e.target.value); }} style={{ ...S.input, padding: "6px 6px" }}>
               {INTERVALS.map(function (x) { return <option key={String(x.v)} value={x.v == null ? "" : String(x.v)}>{x.l}</option>; })}
             </select>
+          </div>
+          <div style={{ display: "flex", gap: 6, alignItems: "center", marginBottom: 6 }}>
+            <span style={{ fontSize: 11, color: "#888" }}>ポイント</span>
+            <input type="number" min="1" value={pts} onChange={function (e) { setPts(e.target.value); }} style={{ ...S.input, width: 70, flex: "none", textAlign: "center", padding: "6px 4px" }} />
+            <span style={{ fontSize: 11, color: "#888" }}>pt</span>
           </div>
           <KindPicker kind={kind} setKind={setKind} />
           <button onClick={markDone} style={{ ...S.smBtn, width: "100%", marginTop: 8, background: "#fff", color: "#43A047", border: "1px solid #C8E6C9" }}>✓ 今日やった（タイマーなしで記録だけ）</button>
@@ -1179,12 +1187,13 @@ function AddCleanItem(p) {
   var _n = useState(""), name = _n[0], setName = _n[1];
   var _k = useState("clean"), kind = _k[0], setKind = _k[1];
   var _i = useState("7"), iv = _i[0], setIv = _i[1];
-  function pickKind(k) { setKind(k); setIv(k === "clean" ? "7" : k === "tidy" ? "30" : "180"); }
+  var _pt = useState(String(DEFAULT_PTS.clean)), pts = _pt[0], setPts = _pt[1];
+  function pickKind(k) { setKind(k); setIv(k === "clean" ? "7" : k === "tidy" ? "30" : "180"); setPts(String(DEFAULT_PTS[k])); }
   function add() {
     if (!name.trim()) return;
     var d = clone(data);
     var id = "task" + Date.now();
-    d.tasks[id] = { id: id, name: name.trim(), category: catForKind(kind, cats, cleanCatIds, "cleaning"), points: 1, room: room.id, interval: iv === "" ? null : parseInt(iv), storage: kind === "storage" };
+    d.tasks[id] = { id: id, name: name.trim(), category: catForKind(kind, cats, cleanCatIds, "cleaning"), points: Math.max(1, parseInt(pts) || DEFAULT_PTS[kind]), room: room.id, interval: iv === "" ? null : parseInt(iv), storage: kind === "storage" };
     if (!d.taskOrder) d.taskOrder = [];
     d.taskOrder.push(id);
     save(d);
@@ -1208,6 +1217,8 @@ function AddCleanItem(p) {
         <select value={iv} onChange={function (e) { setIv(e.target.value); }} style={{ ...S.input, padding: "6px 6px" }}>
           {INTERVALS.map(function (x) { return <option key={String(x.v)} value={x.v == null ? "" : String(x.v)}>{x.l}</option>; })}
         </select>
+        <input type="number" min="1" value={pts} onChange={function (e) { setPts(e.target.value); }} style={{ ...S.input, width: 56, flex: "none", textAlign: "center", padding: "6px 4px" }} />
+        <span style={{ fontSize: 11, color: "#888" }}>pt</span>
       </div>
       <div style={{ display: "flex", gap: 6, marginTop: 8 }}>
         <button onClick={add} style={{ ...S.smBtn, background: "#00897B", color: "#fff", flex: 1 }}>追加（続けて入力できます）</button>
